@@ -12,6 +12,11 @@
 | 2026-11-21 | Facção vem do atributo `Faction` do Player; sem atributo = "Bandido" (na Fase 0 todos trocam tiro). Civil não toma tiro, policial não acerta policial, bandido acerta bandido | design: civil neutro |
 | 2026-11-21 | Colete (`ArmorVest`) protege o tronco e capacete (`ArmorHelmet`) a cabeça; membros sem armadura. Absorvem tudo antes da vida | design: armadura estilo placas |
 | 2026-11-21 | `src/shared/Config/Weapons.luau` e `Combat.luau` criados pela P2 com valores PROVISÓRIOS (M4A1 copiada do legado; membros 0,75x; queda de dano de 120 a 400 studs até 0,6x). A P4 ajusta | autorizado pelo usuário para destravar o servidor |
+| 2026-11-21 | Derrubado: tiro que zeraria a vida de quem está de pé derruba (atributo `Downed`). Derrubado rasteja, não atira, e `Humanoid.Health` vira o sangue que resta (cai até zero em `BleedOutSeconds`; tiros também tiram). A regeneração padrão (`Health`) fica desligada enquanto está no chão | design: derrubado estilo Warzone |
+| 2026-11-21 | Reviver (E / ButtonX) e Finalizar (F / ButtonY) são ProximityPrompts criados pelo servidor, sempre visíveis. O servidor mede o tempo de segurar (HoldBegan/HoldEnded), a distância e quem pode: aliado revive, inimigo finaliza | servidor é autoridade; com a mesma tecla o Roblox esconde um dos botões |
+| 2026-11-21 | Aliado = policial com policial, ou mesma gang (atributo `Gang` do Player). Sem gang, bandido não revive bandido | design: aliado da mesma gang |
+| 2026-11-21 | `CombatHit` passou a mandar `result` ("Hit" / "Downed" / "Killed") no lugar de `lethal`; novo remote `CombatFeed(kind, actor, victimName)` para o kill feed | contrato com a P1, antes de ela começar o cliente |
+| 2026-11-21 | Dummy/NPC só cai derrubado se tiver o atributo `Downable = true`; jogadores sempre caem | testar derrubado sem 2 jogadores |
 
 ## Perguntas em aberto
 

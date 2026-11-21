@@ -15,8 +15,11 @@ local CombatConfig = require(ReplicatedStorage.Shared.Config.Combat)
 local Combat = script.Parent.Parent.Combat
 local Damage = require(Combat.Damage)
 local LagCompensation = require(Combat.LagCompensation)
+local Factions = require(Combat.Factions)
+local DownedService = require(script.Parent.DownedService)
 
 type FirePayload = CombatContract.FirePayload
+type HitResult = CombatContract.HitResult
 
 local REMOTES = CombatContract.Remotes
 local ATTR = CombatContract.Attributes
@@ -48,30 +51,6 @@ local function getEquipped(player: Player): (Tool?, string?, Weapons.WeaponConfi
 	return tool, weaponId, weapon, character
 end
 
-local function factionOf(player: Player): string
-	local faction = player:GetAttribute(ATTR.Faction)
-	return if typeof(faction) == "string" then faction else CombatContract.DefaultFaction
-end
-
--- Civil não toma tiro; policial não acerta policial; bandido acerta bandido.
--- victim nil = NPC/dummy.
-local function canDamage(attacker: Player, victim: Player?): boolean
-	if not victim then
-		return true
-	end
-	if victim == attacker then
-		return false
-	end
-	local victimFaction = factionOf(victim)
-	if victimFaction == FACTIONS.Civil then
-		return false
-	end
-	if factionOf(attacker) == FACTIONS.Police and victimFaction == FACTIONS.Police then
-		return false
-	end
-	return true
-end
-
 -- Raycast do mundo ignorando o atirador e todos os jogadores (que são testados com rewind)
 local function worldRaycastParams(): RaycastParams
 	local ignore: { Instance } = {}
@@ -86,8 +65,18 @@ local function worldRaycastParams(): RaycastParams
 	return params
 end
 
--- Aplica dano já com armadura. Retorna se morreu (ou caiu) e se acertou armadura.
-local function applyDamage(model: Model, humanoid: Humanoid, region: Damage.Region, rawDamage: number): (boolean, boolean)
+-- Aplica dano já com armadura. Retorna o resultado (acertou, derrubou, matou) e se acertou armadura.
+local function applyDamage(
+	attacker: Player,
+	model: Model,
+	humanoid: Humanoid,
+	region: Damage.Region,
+	rawDamage: number
+): (HitResult, boolean)
+	-- Proteção de spawn: ForceField bloqueia o dano todo
+	if model:FindFirstChildOfClass("ForceField") then
+		return "Hit", false
+	end
 	local armorAttr = if region == "Head" then ATTR.Helmet elseif region == "Torso" then ATTR.Vest else nil
 	local toHealth = rawDamage
 	local armorHit = false
@@ -100,11 +89,22 @@ local function applyDamage(model: Model, humanoid: Humanoid, region: Damage.Regi
 			armorHit = true
 		end
 	end
+	local wasDowned = DownedService.isDowned(model)
 	if toHealth > 0 then
-		-- TODO(derrubado): quando o DownedService existir, vida 0 vira derrubado em vez de morte
+		-- Tiro que zeraria a vida de quem está de pé derruba em vez de matar
+		if not wasDowned and toHealth >= humanoid.Health and DownedService.isDownable(model) then
+			DownedService.down(model, humanoid, attacker)
+			return "Downed", armorHit
+		end
 		humanoid:TakeDamage(toHealth)
 	end
-	return humanoid.Health <= 0, armorHit
+	if humanoid.Health <= 0 then
+		if wasDowned then
+			DownedService.finishedByShot(model, attacker)
+		end
+		return "Killed", armorHit
+	end
+	return "Hit", armorHit
 end
 
 local function replicateFx(shooter: Player, weaponId: string, origin: Vector3, hitPos: Vector3)
@@ -130,7 +130,7 @@ local function processShot(player: Player, payload: FirePayload)
 		Net.reportAbuse(player, REMOTES.Fire, "weapon_mismatch")
 		return
 	end
-	if factionOf(player) == FACTIONS.Civil then
+	if Factions.of(player) == FACTIONS.Civil then
 		Net.reportAbuse(player, REMOTES.Fire, "civil_shot")
 		return
 	end
@@ -208,14 +208,14 @@ local function processShot(player: Player, payload: FirePayload)
 
 	if hitPart and hitModel then
 		local victimHumanoid = hitModel:FindFirstChildOfClass("Humanoid")
-		if victimHumanoid and victimHumanoid.Health > 0 and canDamage(player, hitPlayer) then
+		if victimHumanoid and victimHumanoid.Health > 0 and Factions.canDamage(player, hitPlayer) then
 			local region = Damage.regionOf(hitPart.Name)
 			local raw = Damage.compute(weapon, region, bestDistance)
-			local lethal, armorHit = applyDamage(hitModel, victimHumanoid, region, raw)
-			hitRemote:FireClient(player, region, lethal, armorHit)
+			local result, armorHit = applyDamage(player, hitModel, victimHumanoid, region, raw)
+			hitRemote:FireClient(player, region, result, armorHit)
 			if CombatConfig.DebugShotLog then
-				print(("[Shot] %s -> %s %s %.1f dmg @ %.0f studs lethal=%s"):format(
-					player.Name, hitModel.Name, region, raw, bestDistance, tostring(lethal)))
+				print(("[Shot] %s -> %s %s %.1f dmg @ %.0f studs %s"):format(
+					player.Name, hitModel.Name, region, raw, bestDistance, result))
 			end
 		end
 	end

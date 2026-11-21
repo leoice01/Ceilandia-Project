@@ -9,7 +9,7 @@
 | Validação de tiro e dano no servidor (regiões do corpo e colete) | P2 · Servidor | Fazendo (servidor pronto; falta a P1 ligar o cliente em `CombatFire` e teste com 2 jogadores) | src/server/Services/CombatService.luau, src/server/Combat/, src/shared/Lib/CombatContract.luau, src/shared/Config/Weapons.luau, src/shared/Config/Combat.luau |
 | Movimento: corrida, slide, mantle, agachar, deitar e lean | P1 · Combate | A fazer | |
 | Câmera, hitmarker, impacto e kill feed | P1 · Combate | A fazer | |
-| Derrubado, reviver e finalizar | P2 · Servidor | A fazer | |
+| Derrubado, reviver e finalizar | P2 · Servidor | Fazendo (servidor pronto e testado com dummy; falta teste com 2 jogadores, rastejar no cliente legado e kit de autorreanimação) | src/server/Services/DownedService.luau, src/server/Combat/Factions.luau, src/shared/Config/Downed.luau |
 | Anti-exploit básico e logs de tiro | P2 · Servidor | Fazendo (remotes novos com rate limit e log de abuso; GunServer legado ainda sem) | src/shared/Lib/Net.luau, src/shared/Config/Net.luau |
 | Modelos das 3 primeiras armas | P3 · Arte 3D | A fazer | |
 | Personagem base e arena de teste | P3 · Arte 3D | A fazer | |
