@@ -11,6 +11,7 @@ local Net = require(ReplicatedStorage.Shared.Lib.Net)
 local CombatContract = require(ReplicatedStorage.Shared.Lib.CombatContract)
 local DownedConfig = require(ReplicatedStorage.Shared.Config.Downed)
 local Factions = require(script.Parent.Parent.Combat.Factions)
+local ArmorService = require(script.Parent.ArmorService)
 
 type FeedKind = CombatContract.FeedKind
 
@@ -204,6 +205,8 @@ function DownedService.down(model: Model, humanoid: Humanoid, attacker: Player?)
 		state.regenScript.Enabled = false
 	end
 	humanoid.Health = math.min(DownedConfig.DownedHealth, humanoid.MaxHealth)
+	-- Caiu = placas quebradas; tiros no chão vão direto no sangue
+	ArmorService.strip(model)
 	model:SetAttribute(ATTR.Downed, true)
 
 	local victim = state.player

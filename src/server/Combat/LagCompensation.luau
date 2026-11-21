@@ -26,10 +26,61 @@ local SLOT_COUNT = math.ceil(CombatConfig.HistorySeconds * CombatConfig.HistoryH
 local RECORD_INTERVAL = 1 / CombatConfig.HistoryHz
 local EPSILON = 1e-9
 
+-- Pose do corpo que o PoseAnimator (cliente) desenha agachado e no slide. O servidor não
+-- vê essas poses (são só C0 nos clientes), então aplica a mesma transformação na hitbox.
+-- Mesmos valores do PoseAnimator legado: se mudar lá, mude aqui.
+type BodyPose = { drop: number, lean: number, rightLeg: number, leftLeg: number }
+local CROUCH_POSE: BodyPose = { drop = 1.0, lean = math.rad(-12), rightLeg = math.rad(70), leftLeg = math.rad(-60) }
+local SLIDE_POSE: BodyPose = { drop = 1.3, lean = math.rad(40), rightLeg = math.rad(45), leftLeg = math.rad(-15) }
+local RIGHT_HIP = CFrame.new(0.5, -1, 0) -- quadril no espaço do Torso (R6)
+local LEFT_HIP = CFrame.new(-0.5, -1, 0)
+
+type Poser = (BasePart) -> CFrame
+
 local LagCompensation = {}
 
 local histories: { [Model]: History } = {}
 local started = false
+
+local function bodyPoseOf(character: Model): BodyPose?
+	if character:GetAttribute("Pose") == "Slide" then
+		return SLIDE_POSE
+	end
+	if character:GetAttribute("PoseCrouch") == true then
+		return CROUCH_POSE
+	end
+	return nil
+end
+
+-- Devolve uma função que leva a CFrame de pé de cada parte para a CFrame posada,
+-- ou nil se o personagem está de pé (ou não é R6, igual ao PoseAnimator)
+local function poserFor(character: Model): Poser?
+	local pose = bodyPoseOf(character)
+	if not pose then
+		return nil
+	end
+	local root = character:FindFirstChild("HumanoidRootPart")
+	local torso = character:FindFirstChild("Torso")
+	if not (root and root:IsA("BasePart") and torso and torso:IsA("BasePart")) then
+		return nil
+	end
+	-- corpo desce e inclina em volta da HumanoidRootPart (como o RootJoint.C0 no cliente)
+	local rootCf = root.CFrame
+	local body = rootCf * CFrame.new(0, -pose.drop, 0) * CFrame.Angles(pose.lean, 0, 0) * rootCf:Inverse()
+	-- pernas giram no quadril (como Right/Left Hip.C0 no cliente)
+	local torsoCf = torso.CFrame
+	local rightLeg = torsoCf * RIGHT_HIP * CFrame.Angles(pose.rightLeg, 0, 0) * RIGHT_HIP:Inverse() * torsoCf:Inverse()
+	local leftLeg = torsoCf * LEFT_HIP * CFrame.Angles(pose.leftLeg, 0, 0) * LEFT_HIP:Inverse() * torsoCf:Inverse()
+	return function(part: BasePart): CFrame
+		local cf = part.CFrame
+		if part.Name == "Right Leg" then
+			cf = rightLeg * cf
+		elseif part.Name == "Left Leg" then
+			cf = leftLeg * cf
+		end
+		return body * cf
+	end
+end
 
 local function newHistory(): History
 	local ring: { Snapshot } = table.create(SLOT_COUNT)
@@ -76,17 +127,19 @@ local function record(now: number)
 		local snapshot = history.ring[history.newest]
 		snapshot.t = now
 		table.clear(snapshot.cframes)
+		local poser = poserFor(character)
 		for _, part in history.parts do
-			snapshot.cframes[part] = part.CFrame
+			snapshot.cframes[part] = if poser then poser(part) else part.CFrame
 		end
 		history.count = math.min(history.count + 1, SLOT_COUNT)
 	end
 end
 
--- CFrame de uma parte no tempo t, interpolando entre dois snapshots
-local function cframeAt(history: History, part: BasePart, t: number): CFrame
+-- CFrame de uma parte no tempo t, interpolando entre dois snapshots.
+-- live = posição atual já com a pose do corpo (para quando t é mais novo que o histórico).
+local function cframeAt(history: History, part: BasePart, t: number, live: Poser): CFrame
 	if history.count == 0 then
-		return part.CFrame
+		return live(part)
 	end
 	local newerSnap: Snapshot? = nil
 	local index = history.newest
@@ -95,11 +148,11 @@ local function cframeAt(history: History, part: BasePart, t: number): CFrame
 		local cf = snap.cframes[part]
 		if snap.t <= t then
 			if not cf then
-				return part.CFrame
+				return live(part)
 			end
 			if not newerSnap then
 				-- t é mais novo que o último snapshot: usa a posição atual
-				return part.CFrame
+				return live(part)
 			end
 			local newerCf = newerSnap.cframes[part]
 			if not newerCf then
@@ -119,7 +172,7 @@ local function cframeAt(history: History, part: BasePart, t: number): CFrame
 			return oldest
 		end
 	end
-	return part.CFrame
+	return live(part)
 end
 
 -- Teste raio x caixa orientada (slab). dir é o raio inteiro (direção * alcance).
@@ -164,10 +217,14 @@ function LagCompensation.raycastCharacter(character: Model, t: number, origin: V
 	local length = dir.Magnitude
 	local bestPart: BasePart? = nil
 	local bestFraction = math.huge
+	local poser = poserFor(character)
+	local function live(part: BasePart): CFrame
+		return if poser then poser(part) else part.CFrame
+	end
 
 	for _, part in parts do
 		if part.Parent == character then
-			local cf = if history then cframeAt(history, part, t) else part.CFrame
+			local cf = if history then cframeAt(history, part, t, live) else live(part)
 			local fraction = rayBoxFraction(cf, part.Size, origin, dir)
 			if fraction and fraction < bestFraction then
 				bestFraction = fraction

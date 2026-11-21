@@ -5,9 +5,14 @@
 -- Cliente -> servidor
 --   CombatFire(payload: FirePayload)  tiro; o cliente já mostrou o feedback local
 --   CombatReload()                    pedido de recarga
+--   ArmorInsertPlate()                pedido de colocar UMA placa no colete; para encher
+--                                     o colete, o cliente manda de novo quando Plating sumir
 -- Servidor -> cliente
---   CombatHit(region: HitRegion, result: HitResult, armorHit: boolean)
---       só para quem atirou: confirma o acerto (hitmarker real)
+--   CombatHit(region: HitRegion, result: HitResult, armor: ArmorHit,
+--             armorDamage: number, healthDamage: number, hitPos: Vector3)
+--       só para quem atirou: confirma o acerto (hitmarker real). armor diz se bateu
+--       na armadura e se quebrou uma placa; armorDamage/healthDamage = quanto foi para
+--       a armadura e para a vida (números de dano); hitPos = onde o tiro bateu
 --   CombatFX(shooter: Player, weaponId: string, origin: Vector3, hitPos: Vector3)
 --       para os outros jogadores por perto: desenhar rastro e impacto
 --   CombatFeed(kind: FeedKind, actor: Player?, victimName: string)
@@ -16,8 +21,11 @@
 -- Atributos que só o servidor escreve:
 --   Player.Faction (string)        "Civil" | "Policia" | "Bandido"; sem atributo = DefaultFaction
 --   Player.Gang (string)           nome da gang; mesma gang = pode reviver
---   Character.ArmorVest (number)   colete: absorve dano no tronco
---   Character.ArmorHelmet (number) capacete: absorve dano na cabeça
+--   Player.PlatesCarried (number)  placas extras na mochila
+--   Character.ArmorVest (number)   armadura do colete (placas × PlateHealth); absorve antes da vida
+--   Character.ArmorVestMax (number) armadura máxima do colete (para a barra no HUD)
+--   Character.Plating (boolean)    colocando placa agora (não atira)
+--   Character.ArmorHelmet (number) capacete: absorve dano na cabeça, antes do colete
 --   Character.Downed (boolean)     derrubado: rasteja, não atira; Humanoid.Health = sangue que resta
 --   Model.Downable (boolean)       NPC/dummy que cai derrubado em vez de morrer (jogadores sempre caem)
 --   Tool.Weapon (string), Tool.Ammo (number), Tool.Reloading (boolean)
@@ -25,6 +33,8 @@
 -- Interação (ProximityPrompt criado pelo servidor na HumanoidRootPart de quem está derrubado):
 --   "Revive" (aliado segura E / ButtonX) e "Finish" (inimigo segura F / ButtonY). O cliente pode esconder o prompt
 --   que não se aplica ao jogador, mas quem decide é o servidor.
+-- Caixa de placas: qualquer BasePart com a tag "ArmorCrate" (CollectionService) ganha um
+--   ProximityPrompt "ArmorCrate" (E) que enche as placas da mochila.
 
 local Net = require(script.Parent.Net)
 
@@ -38,6 +48,8 @@ export type FirePayload = {
 export type HitRegion = "Head" | "Torso" | "Limb"
 export type HitResult = "Hit" | "Downed" | "Killed"
 export type FeedKind = "Downed" | "Finished" | "BledOut" | "Revived"
+-- "None" = sem armadura; "Hit" = armadura absorveu; "Broken" = uma placa (ou o capacete) quebrou
+export type ArmorHit = "None" | "Hit" | "Broken"
 
 local MAX_WEAPON_ID_LENGTH = 32
 local FIRE_PAYLOAD_FIELDS = 4
@@ -49,10 +61,15 @@ local CombatContract = {
 		Hit = "CombatHit",
 		FX = "CombatFX",
 		Feed = "CombatFeed",
+		InsertPlate = "ArmorInsertPlate",
 	},
 	Prompts = {
 		Revive = "Revive",
 		Finish = "Finish",
+		ArmorCrate = "ArmorCrate",
+	},
+	Tags = {
+		ArmorCrate = "ArmorCrate",
 	},
 	Factions = {
 		Civil = "Civil",
@@ -66,6 +83,9 @@ local CombatContract = {
 		Gang = "Gang",
 		Downable = "Downable",
 		Vest = "ArmorVest",
+		VestMax = "ArmorVestMax",
+		Plating = "Plating",
+		PlatesCarried = "PlatesCarried",
 		Helmet = "ArmorHelmet",
 		Downed = "Downed",
 		Weapon = "Weapon",

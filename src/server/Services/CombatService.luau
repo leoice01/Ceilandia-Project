@@ -17,9 +17,11 @@ local Damage = require(Combat.Damage)
 local LagCompensation = require(Combat.LagCompensation)
 local Factions = require(Combat.Factions)
 local DownedService = require(script.Parent.DownedService)
+local ArmorService = require(script.Parent.ArmorService)
 
 type FirePayload = CombatContract.FirePayload
 type HitResult = CombatContract.HitResult
+type ArmorHit = CombatContract.ArmorHit
 
 local REMOTES = CombatContract.Remotes
 local ATTR = CombatContract.Attributes
@@ -65,36 +67,37 @@ local function worldRaycastParams(): RaycastParams
 	return params
 end
 
--- Aplica dano já com armadura. Retorna o resultado (acertou, derrubou, matou) e se acertou armadura.
+-- Resultado de um tiro aceito (usado pela ponte da arma legada)
+export type ShotReport = {
+	tool: Tool,
+	weaponId: string,
+	origin: Vector3,
+	hitPos: Vector3,
+	region: Damage.Region?, -- nil = não acertou ninguém que toma dano
+	result: HitResult?,
+}
+
+-- Aplica dano já com armadura. Retorna o resultado (acertou, derrubou, matou), o acerto
+-- na armadura e quanto do dano foi para a armadura e para a vida.
 local function applyDamage(
 	attacker: Player,
 	model: Model,
 	humanoid: Humanoid,
 	region: Damage.Region,
 	rawDamage: number
-): (HitResult, boolean)
+): (HitResult, ArmorHit, number, number)
 	-- Proteção de spawn: ForceField bloqueia o dano todo
 	if model:FindFirstChildOfClass("ForceField") then
-		return "Hit", false
+		return "Hit", "None", 0, 0
 	end
-	local armorAttr = if region == "Head" then ATTR.Helmet elseif region == "Torso" then ATTR.Vest else nil
-	local toHealth = rawDamage
-	local armorHit = false
-	if armorAttr then
-		local armor = model:GetAttribute(armorAttr)
-		if typeof(armor) == "number" and armor > 0 then
-			local remaining, leftover = Damage.absorb(armor, rawDamage)
-			model:SetAttribute(armorAttr, remaining)
-			toHealth = leftover
-			armorHit = true
-		end
-	end
+	local toHealth, armorHit = ArmorService.absorb(model, region, rawDamage)
+	local toArmor = rawDamage - toHealth
 	local wasDowned = DownedService.isDowned(model)
 	if toHealth > 0 then
 		-- Tiro que zeraria a vida de quem está de pé derruba em vez de matar
 		if not wasDowned and toHealth >= humanoid.Health and DownedService.isDownable(model) then
 			DownedService.down(model, humanoid, attacker)
-			return "Downed", armorHit
+			return "Downed", armorHit, toArmor, toHealth
 		end
 		humanoid:TakeDamage(toHealth)
 	end
@@ -102,9 +105,9 @@ local function applyDamage(
 		if wasDowned then
 			DownedService.finishedByShot(model, attacker)
 		end
-		return "Killed", armorHit
+		return "Killed", armorHit, toArmor, toHealth
 	end
-	return "Hit", armorHit
+	return "Hit", armorHit, toArmor, toHealth
 end
 
 local function replicateFx(shooter: Player, weaponId: string, origin: Vector3, hitPos: Vector3)
@@ -120,39 +123,43 @@ local function replicateFx(shooter: Player, weaponId: string, origin: Vector3, h
 	end
 end
 
-local function processShot(player: Player, payload: FirePayload)
+local function processShot(player: Player, payload: FirePayload): ShotReport?
 	local tool, weaponId, weapon, character = getEquipped(player)
 	if not tool or not weaponId or not weapon or not character then
 		Net.reportAbuse(player, REMOTES.Fire, "no_weapon")
-		return
+		return nil
 	end
 	if payload.weaponId ~= weaponId then
 		Net.reportAbuse(player, REMOTES.Fire, "weapon_mismatch")
-		return
+		return nil
 	end
 	if Factions.of(player) == FACTIONS.Civil then
 		Net.reportAbuse(player, REMOTES.Fire, "civil_shot")
-		return
+		return nil
 	end
 
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	local head = character:FindFirstChild("Head") :: BasePart?
 	-- Pacote atrasado de quem acabou de morrer/cair não é abuso: só ignora
 	if not humanoid or humanoid.Health <= 0 or not head then
-		return
+		return nil
 	end
-	if character:GetAttribute(ATTR.Downed) == true or tool:GetAttribute(ATTR.Reloading) == true then
-		return
+	if
+		character:GetAttribute(ATTR.Downed) == true
+		or character:GetAttribute(ATTR.Plating) == true
+		or tool:GetAttribute(ATTR.Reloading) == true
+	then
+		return nil
 	end
 
 	local now = os.clock()
 	if now - (lastShot[player] or 0) < weapon.FireRate * CombatConfig.FireRateTolerance then
 		Net.reportAbuse(player, REMOTES.Fire, "fire_rate")
-		return
+		return nil
 	end
 	local ammo = tool:GetAttribute(ATTR.Ammo)
 	if typeof(ammo) ~= "number" or ammo <= 0 then
-		return
+		return nil
 	end
 
 	-- A origem precisa estar perto da cabeça e sem parede entre as duas
@@ -160,14 +167,14 @@ local function processShot(player: Player, payload: FirePayload)
 	local fromHead = origin - head.Position
 	if fromHead.Magnitude > CombatConfig.OriginTolerance then
 		Net.reportAbuse(player, REMOTES.Fire, "origin_far")
-		return
+		return nil
 	end
 	local selfParams = RaycastParams.new()
 	selfParams.FilterType = Enum.RaycastFilterType.Exclude
 	selfParams.FilterDescendantsInstances = { character }
 	if fromHead.Magnitude > 0.05 and workspace:Raycast(head.Position, fromHead, selfParams) then
 		Net.reportAbuse(player, REMOTES.Fire, "origin_through_wall")
-		return
+		return nil
 	end
 
 	lastShot[player] = now
@@ -205,28 +212,46 @@ local function processShot(player: Player, payload: FirePayload)
 	end
 
 	local hitPos = origin + payload.direction.Unit * bestDistance
+	local report: ShotReport = { tool = tool, weaponId = weaponId, origin = origin, hitPos = hitPos }
 
 	if hitPart and hitModel then
 		local victimHumanoid = hitModel:FindFirstChildOfClass("Humanoid")
 		if victimHumanoid and victimHumanoid.Health > 0 and Factions.canDamage(player, hitPlayer) then
 			local region = Damage.regionOf(hitPart.Name)
 			local raw = Damage.compute(weapon, region, bestDistance)
-			local result, armorHit = applyDamage(player, hitModel, victimHumanoid, region, raw)
-			hitRemote:FireClient(player, region, result, armorHit)
+			local result, armorHit, toArmor, toHealth = applyDamage(player, hitModel, victimHumanoid, region, raw)
+			hitRemote:FireClient(player, region, result, armorHit, toArmor, toHealth, hitPos)
+			report.region = region
+			report.result = result
 			if CombatConfig.DebugShotLog then
-				print(("[Shot] %s -> %s %s %.1f dmg @ %.0f studs %s"):format(
-					player.Name, hitModel.Name, region, raw, bestDistance, result))
+				print(("[Shot] %s -> %s %s %.1f dmg (armor %.1f, health %.1f) @ %.0f studs %s"):format(
+					player.Name, hitModel.Name, region, raw, toArmor, toHealth, bestDistance, result))
 			end
 		end
 	end
 
 	replicateFx(player, weaponId, origin, hitPos)
+	return report
 end
 
 local function onFire(player: Player, payload: FirePayload)
 	debug.profilebegin("Combat_ShotValidation")
 	processShot(player, payload)
 	debug.profileend()
+end
+
+-- Tiro vindo de outra entrada do servidor (ponte da arma legada). Passa pelas mesmas
+-- validações do remote CombatFire, menos o rate limit bruto do Net.
+function CombatService.fire(player: Player, payload: FirePayload): ShotReport?
+	local ok, reason = CombatContract.validateFire(payload)
+	if not ok then
+		Net.reportAbuse(player, REMOTES.Fire, reason or "invalid_args")
+		return nil
+	end
+	debug.profilebegin("Combat_ShotValidation")
+	local report = processShot(player, payload)
+	debug.profileend()
+	return report
 end
 
 local function onReload(player: Player)
@@ -252,6 +277,11 @@ local function onReload(player: Player)
 			tool:SetAttribute(ATTR.Ammo, weapon.MagSize)
 		end
 	end)
+end
+
+-- Recarga vinda de outra entrada do servidor (ponte da arma legada)
+function CombatService.reload(player: Player)
+	onReload(player)
 end
 
 function CombatService:Init()
