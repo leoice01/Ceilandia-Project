@@ -71,6 +71,12 @@ local CombatContract = {
 	Tags = {
 		ArmorCrate = "ArmorCrate",
 	},
+	-- Item de colocar placa: Tool criada pelo servidor na mochila a cada spawn.
+	-- O cliente manda ArmorInsertPlate ao clicar (segurando = enche o colete).
+	PlateItem = {
+		Name = "Placas",
+		Attribute = "PlateItem",
+	},
 	Factions = {
 		Civil = "Civil",
 		Police = "Policia",

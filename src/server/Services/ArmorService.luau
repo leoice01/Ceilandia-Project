@@ -84,6 +84,34 @@ local function equipOnSpawn(player: Player, character: Model)
 	player:SetAttribute(ATTR.PlatesCarried, math.min(ArmorConfig.SpawnCarried, ArmorConfig.CarryMax))
 end
 
+-- Item "Placas" na mochila. A mochila é refeita a cada spawn, então dá de novo;
+-- o defer espera o Roblox copiar o StarterPack antes, para não ser apagado.
+local function givePlateItem(player: Player)
+	task.defer(function()
+		local backpack = player:FindFirstChildOfClass("Backpack") or player:WaitForChild("Backpack", 5)
+		if not backpack then
+			return
+		end
+		local item = CombatContract.PlateItem
+		for _, holder in { backpack, player.Character } do
+			if holder then
+				for _, child in holder:GetChildren() do
+					if child:IsA("Tool") and child:GetAttribute(item.Attribute) == true then
+						return
+					end
+				end
+			end
+		end
+		local tool = Instance.new("Tool")
+		tool.Name = item.Name
+		tool.RequiresHandle = false
+		tool.CanBeDropped = false
+		tool.ToolTip = "Clique ou segure para colocar placas"
+		tool:SetAttribute(item.Attribute, true)
+		tool.Parent = backpack
+	end)
+end
+
 local function isStanding(character: Model): Humanoid?
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if not humanoid or humanoid.Health <= 0 or character:GetAttribute(ATTR.Downed) == true then
@@ -190,9 +218,11 @@ function ArmorService:Start()
 	local function onPlayer(player: Player)
 		if player.Character then
 			equipOnSpawn(player, player.Character)
+			givePlateItem(player)
 		end
 		player.CharacterAdded:Connect(function(character: Model)
 			equipOnSpawn(player, character)
+			givePlateItem(player)
 		end)
 	end
 	for _, player in Players:GetPlayers() do
