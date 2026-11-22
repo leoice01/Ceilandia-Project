@@ -1,15 +1,11 @@
 --!strict
 -- Polícia x Ladrões na delegacia provisória (workspace.PoliceStation).
--- Quem decide a facção (atributo Faction: Civil / Bandido / Policia) é o FactionService;
--- este serviço só acrescenta o que ele não tem e nunca escreve a facção por conta própria
--- (exceto no fallback sem FactionService e na volta a Bandido da Fase 0, ver leave()):
---   * Teams nativos do Roblox sincronizados com a facção (nome/cor de equipe)
---   * botões físicos da delegacia: terminal "Entrar para a Polícia" e armário
---     "Devolver distintivo", que pedem a troca ao FactionService
---   * regras extras da delegacia: sem procurado, sem combate recente, sem roubo em
---     andamento, intervalo entre trocas
---   * policial nasce na delegacia, com uniforme provisório e proteção de spawn
--- A troca recria o personagem: armas e uniforme da equipe nova, nada da anterior.
+-- Opção A: FactionService é o ÚNICO que escreve Player.Faction. Este serviço é espelho:
+--   * injeta checagens (Wanted, Robbery, Combat, cooldown) no FactionService
+--   * ouve FactionService.onFactionChanged (e o join) para ajustar Team, RespawnLocation,
+--     uniforme, Notice e LoadCharacter quando o lado muda
+--   * cria os botões físicos da delegacia (RecruitTerminal -> JoinPolice, LeaveLocker -> GoCivil)
+--     que encaminham direto para FactionService.requestAction.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -20,17 +16,16 @@ local Net = require(ReplicatedStorage.Shared.Lib.Net)
 local Notice = require(ReplicatedStorage.Shared.Lib.Notice)
 local TeamsConfig = require(ReplicatedStorage.Shared.Config.Teams)
 local CombatService = require(script.Parent.CombatService)
+local FactionService = require(script.Parent.FactionService)
 local WantedService = require(script.Parent.WantedService)
 local RobberyService = require(script.Parent.RobberyService)
 
 type Side = "Police" | "Robbers"
 
 local ATTR = CombatContract.Attributes
-local FACTIONS = CombatContract.Factions
 local STATION_NAME = "PoliceStation"
 local PROMPT_SLACK = 3 -- folga de distância para a rede (studs)
 local UNIFORM_FOLDER = "PoliceUniform"
-local IN_COMBAT_UNTIL = "InCombatUntil" -- atributo do FactionService (hora do servidor)
 
 -- Motivos do FactionService -> texto para o jogador
 local REASON_TEXT: { [string]: string } = {
@@ -39,29 +34,19 @@ local REASON_TEXT: { [string]: string } = {
 	in_combat = "Você está em combate. Espere um pouco.",
 	in_transition = "Termine o que está fazendo antes.",
 	wanted = "Você está procurado. Despiste a polícia antes.",
+	robbing = "Termine ou abandone o roubo antes.",
 	dirty_cash = "Você está com dinheiro sujo. Lave antes.",
 	stolen_items = "Você está com itens roubados. Venda antes.",
 	not_at_station = "Vá até a delegacia.",
 	downed = "Agora não dá.",
 	dead = "Só dá para trocar de equipe vivo.",
+	already_police = "Você já é policial.",
+	already_civil = "Você já está fora da Polícia.",
 }
-
--- FactionService e regras de facção (de outra pessoa da equipe; pode não existir numa
--- cópia antiga do projeto: aí este serviço usa o próprio fallback)
-local function optional(parent: Instance, name: string): any
-	local module = parent:FindFirstChild(name)
-	return if module and module:IsA("ModuleScript") then (require :: any)(module) else nil
-end
-local Combat = script.Parent.Parent.Combat
-local FactionService = optional(script.Parent, "FactionService")
-local PoliceStations = optional(Combat, "PoliceStations")
-local FactionRules = optional(Combat, "FactionRules")
-local FactionsConfig = optional(ReplicatedStorage.Shared.Config, "Factions")
 
 local TeamService = {}
 
 local teams: { [Side]: Team } = {}
-local lastSwitch: { [Player]: number } = {}
 local busy: { [Player]: boolean } = {}
 local policeSpawn: SpawnLocation? = nil
 
@@ -230,107 +215,23 @@ local function onCharacter(player: Player, character: Model)
 	end
 end
 
--- ---------- troca de equipe ----------
--- Regras da delegacia que vêm antes das do FactionService
-local function canSwitch(player: Player, to: Side): (boolean, string?)
-	if (to == "Police") == isPolice(player) then
-		return false, if to == "Police" then "Você já é policial." else "Você já está fora da Polícia."
-	end
-	local character = player.Character
-	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-	if not character or not humanoid or humanoid.Health <= 0 then
-		return false, REASON_TEXT.dead
-	end
-	if character:GetAttribute(ATTR.Downed) == true or character:GetAttribute(ATTR.Plating) == true then
-		return false, REASON_TEXT.downed
-	end
-	if WantedService.getStars(player) > 0 then
-		return false, "Você está procurado. Despiste a polícia antes de se alistar."
-	end
-	local sinceCombat = CombatService.secondsSinceCombat(player)
-	if sinceCombat < TeamsConfig.CombatLock then
-		return false, ("Você está em combate. Espere %d s."):format(math.ceil(TeamsConfig.CombatLock - sinceCombat))
-	end
-	local combatUntil = player:GetAttribute(IN_COMBAT_UNTIL)
-	if typeof(combatUntil) == "number" and combatUntil > workspace:GetServerTimeNow() then
-		return false, ("Você está em combate. Espere %d s."):format(math.ceil(combatUntil - workspace:GetServerTimeNow()))
-	end
-	if RobberyService.isRobbing(player) then
-		return false, "Termine ou abandone o roubo antes."
-	end
-	local last = lastSwitch[player]
-	if last and os.clock() - last < TeamsConfig.SwitchCooldown then
-		return false, ("Espere %d s para trocar de novo."):format(math.ceil(TeamsConfig.SwitchCooldown - (os.clock() - last)))
-	end
-	if to == "Police" and PoliceStations and FactionRules then
-		local police, total = PoliceStations.countFactions()
-		if police >= FactionRules.maxPoliceSlots(total) then
-			return false, REASON_TEXT.police_full
-		end
-	end
-	return true, nil
-end
-
--- Ladrão (ou civil) -> Polícia pelo FactionService. Na Fase 0 todo mundo é Bandido e o
--- FactionService só aceita Civil -> Polícia: a delegacia faz o "entregar a máscara" na hora
--- (forceCivil) e pede o alistamento; se ele recusar, volta para a facção de antes.
-local function join(player: Player): (boolean, string?)
-	if not FactionService then
-		player:SetAttribute(ATTR.Faction, TeamsConfig.Police.Faction) -- fallback sem FactionService
-		return true, nil
-	end
-	local before = factionOf(player)
-	if before ~= FACTIONS.Civil then
-		FactionService.forceCivil(player, "police_recruit")
-	end
-	local ok, reason = FactionService.requestAction(player, "JoinPolice", true)
-	if not ok and factionOf(player) ~= before then
-		player:SetAttribute(ATTR.Faction, before)
-	end
-	return ok, reason
-end
-
--- Polícia -> Ladrão. FactionService: fim de plantão na delegacia (vira Civil na hora).
--- Fase 0 (Phase0AutoBandit): não existe civil jogável, então volta a Bandido — o mesmo que
--- o FactionService faz quando reseta a facção na morte.
-local function leave(player: Player): (boolean, string?)
-	if not FactionService then
-		player:SetAttribute(ATTR.Faction, TeamsConfig.Robbers.Faction) -- fallback sem FactionService
-		return true, nil
-	end
-	local ok, reason = FactionService.requestAction(player, "GoCivil", true)
-	if not ok then
-		return false, reason
-	end
-	if FactionsConfig and FactionsConfig.Phase0AutoBandit and factionOf(player) == FACTIONS.Civil then
-		player:SetAttribute(ATTR.Faction, TeamsConfig.Robbers.Faction)
-	end
-	return true, nil
-end
-
+-- ---------- troca de equipe (encaminha ao FactionService; nunca escreve Faction) ----------
 function TeamService.requestSwitch(player: Player, to: Side): boolean
 	if busy[player] then
 		return false
 	end
-	local ok, reason = canSwitch(player, to)
-	if not ok then
-		Notice.send(player, "Delegacia", reason or "Não foi possível trocar de equipe.")
+	if (to == "Police") == isPolice(player) then
+		Notice.send(player, "Delegacia", if to == "Police" then REASON_TEXT.already_police else REASON_TEXT.already_civil)
 		return false
 	end
 	busy[player] = true
-	local switched, why = if to == "Police" then join(player) else leave(player)
+	local action: CombatContract.FactionAction = if to == "Police" then "JoinPolice" else "GoCivil"
+	local ok, why = FactionService.requestAction(player, action, true)
 	busy[player] = nil
-	if not switched then
+	if not ok then
 		Notice.send(player, "Delegacia", (why and REASON_TEXT[why]) or "Não foi possível trocar de equipe.")
 		return false
 	end
-	lastSwitch[player] = os.clock()
-	syncTeam(player)
-	Notice.send(player, "Delegacia", if to == "Police"
-		then "Você entrou para a Polícia. Bem-vindo à corporação!"
-		else "Você devolveu o distintivo e saiu da Polícia.")
-	-- personagem novo: armas, uniforme e spawn da equipe nova (nada da anterior sobra)
-	player:LoadCharacter()
 	return true
 end
 
@@ -358,6 +259,13 @@ function TeamService:Init()
 	Net.serverEvent(Notice.Remote) -- existe desde o começo (o cliente espera por ele)
 	teams.Police = ensureTeam("Police")
 	teams.Robbers = ensureTeam("Robbers")
+	FactionService.setExternalChecks({
+		getWantedStars = WantedService.getStars,
+		isRobbing = RobberyService.isRobbing,
+		secondsSinceCombat = CombatService.secondsSinceCombat,
+		combatLockSeconds = TeamsConfig.CombatLock,
+		switchCooldownSeconds = TeamsConfig.SwitchCooldown,
+	})
 end
 
 function TeamService:Start()
@@ -383,12 +291,23 @@ function TeamService:Start()
 		warn("[TeamService] workspace.PoliceStation não encontrado: sem recrutamento")
 	end
 
-	local function onPlayer(player: Player)
-		if not FactionService and player:GetAttribute(ATTR.Faction) == nil then
-			player:SetAttribute(ATTR.Faction, CombatContract.DefaultFaction) -- fallback
+	FactionService.onFactionChanged(function(player: Player, newFaction: string, oldFaction: string, reason: string?)
+		if not player.Parent then
+			return
 		end
 		syncTeam(player)
-		-- qualquer mudança de facção (delegacia, máscara, morte...) acerta equipe e spawn
+		if newFaction ~= oldFaction and (reason == "join_police" or reason == "end_shift") then
+			Notice.send(player, "Delegacia", if newFaction == TeamsConfig.Police.Faction
+				then "Você entrou para a Polícia. Bem-vindo à corporação!"
+				else "Você devolveu o distintivo e saiu da Polícia.")
+			-- personagem novo: armas, uniforme e spawn da equipe nova (nada da anterior sobra)
+			player:LoadCharacter()
+		end
+	end)
+
+	local function onPlayer(player: Player)
+		syncTeam(player)
+		-- acompanha o Faction definido pelo FactionService no join ou em qualquer transição
 		player:GetAttributeChangedSignal(ATTR.Faction):Connect(function()
 			syncTeam(player)
 		end)
@@ -404,7 +323,6 @@ function TeamService:Start()
 	end
 	Players.PlayerAdded:Connect(onPlayer)
 	Players.PlayerRemoving:Connect(function(player: Player)
-		lastSwitch[player] = nil
 		busy[player] = nil
 	end)
 end

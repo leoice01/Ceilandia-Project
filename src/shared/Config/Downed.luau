@@ -22,4 +22,10 @@ return {
 	InteractDistance = 8,
 	-- Folga no tempo de segurar, para variação de rede (fração do tempo pedido)
 	HoldTolerance = 0.15,
+	-- Velocidade base ao levantar (ignora o snapshot da queda, ex.: agachado/slide) (studs/s)
+	BaseWalkSpeed = 16, -- PROVISÓRIO (P4)
+	-- Intervalo de revalidação contínua do hold de reviver/finalizar (s)
+	HoldCheckInterval = 0.1, -- PROVISÓRIO (P4)
+	-- Janela entre HoldEnded e Triggered após cumprir o tempo mínimo (s)
+	HoldTriggerGraceSeconds = 0.5, -- PROVISÓRIO (P4)
 }

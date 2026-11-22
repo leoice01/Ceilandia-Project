@@ -4,6 +4,7 @@
 -- Editor e pode ser publicado; no Studio dá para testar com ID temporário.
 
 local KeyframeSequenceProvider = game:GetService("KeyframeSequenceProvider")
+local RunService = game:GetService("RunService")
 
 export type JointPose = {
 	rx: number?, -- graus no eixo X do pai: perna/braço positivo = para frente; Root negativo = tronco para frente
@@ -92,6 +93,10 @@ function ClipBuilder.animationId(name: string, clip: Clip, published: { [string]
 	local id = published[name]
 	if id and id ~= "" then
 		return id
+	end
+	-- ID temporário só existe no Studio; no jogo publicado o clipe precisa de ID publicado
+	if not RunService:IsStudio() then
+		return nil
 	end
 	local ok, temp = pcall(function()
 		return KeyframeSequenceProvider:RegisterKeyframeSequence(ClipBuilder.build(name, clip))

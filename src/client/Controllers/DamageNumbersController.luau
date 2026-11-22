@@ -1,5 +1,5 @@
 --!strict
--- PROVISÓRIO (feito pela P2 com OK do usuário; a P1 assume depois).
+-- P1
 -- Números de dano que sobem do ponto do acerto, só para quem atirou:
 --   azul = dano na armadura, branco = dano na vida, vermelho = dano na vida na cabeça.
 -- Acerto na armadura também solta faíscas azuis (mais forte quando a placa quebra).
@@ -15,11 +15,13 @@ local CombatContract = require(Shared:WaitForChild("Lib"):WaitForChild("CombatCo
 -- Aparência (UX do cliente, não é balanceamento)
 local ARMOR_COLOR = Color3.fromRGB(70, 170, 255)
 local HEALTH_COLOR = Color3.fromRGB(255, 255, 255)
-local CRITICAL_COLOR = Color3.fromRGB(255, 60, 60)
+local CRITICAL_COLOR = Color3.fromRGB(255, 90, 74)
+local STROKE_COLOR = Color3.fromRGB(10, 11, 15)
+local FONT_NUM = Font.new("rbxasset://fonts/families/Oswald.json", Enum.FontWeight.Bold)
 local NUMBER_LIFETIME = 0.8 -- s
 local NUMBER_RISE = 2.5 -- studs
 local NUMBER_JITTER = 0.8 -- espalha números de tiros seguidos (studs)
-local NUMBER_SIZE = 34 -- px
+local NUMBER_SIZE = 38 -- px
 local SPARKS_HIT = 10
 local SPARKS_BROKEN = 28
 local FLASH_TIME = 0.08 -- s
@@ -37,7 +39,7 @@ local function anchorAt(position: Vector3, lifetime: number): Attachment
 	return attachment
 end
 
-local function showNumber(position: Vector3, amount: number, color: Color3, sideOffset: number)
+local function showNumber(position: Vector3, amount: number, color: Color3, sideOffset: number, isCrit: boolean?)
 	local rounded = math.floor(amount + 0.5)
 	if rounded <= 0 then
 		return
@@ -45,7 +47,7 @@ local function showNumber(position: Vector3, amount: number, color: Color3, side
 	local anchor = anchorAt(position, NUMBER_LIFETIME + 0.1)
 
 	local billboard = Instance.new("BillboardGui")
-	billboard.Size = UDim2.fromOffset(120, NUMBER_SIZE + 10)
+	billboard.Size = UDim2.fromOffset(120, NUMBER_SIZE + 12)
 	billboard.AlwaysOnTop = true
 	billboard.LightInfluence = 0
 	local start = Vector3.new(sideOffset + random:NextNumber(-NUMBER_JITTER, NUMBER_JITTER) * 0.5, 0.5, 0)
@@ -57,25 +59,28 @@ local function showNumber(position: Vector3, amount: number, color: Color3, side
 	local label = Instance.new("TextLabel")
 	label.Size = UDim2.fromScale(1, 1)
 	label.BackgroundTransparency = 1
-	label.Font = Enum.Font.GothamBlack
-	label.TextSize = NUMBER_SIZE
+	label.FontFace = FONT_NUM
+	label.TextSize = if isCrit then NUMBER_SIZE + 6 else NUMBER_SIZE
 	label.TextColor3 = color
-	label.TextStrokeTransparency = 0.2
-	label.TextStrokeColor3 = Color3.new(0, 0, 0)
 	label.Text = tostring(rounded)
 	label.Parent = billboard
 
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = STROKE_COLOR
+	stroke.Thickness = 2
+	stroke.Transparency = 0.25
+	stroke.Parent = label
+
 	-- "Pop" rápido e depois sobe e some
 	local scale = Instance.new("UIScale")
-	scale.Scale = 1.4
+	scale.Scale = if isCrit then 1.6 else 1.38
 	scale.Parent = label
-	TweenService:Create(scale, TweenInfo.new(0.12, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+	TweenService:Create(scale, TweenInfo.new(0.14, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
 	local info = TweenInfo.new(NUMBER_LIFETIME, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 	TweenService:Create(billboard, info, { StudsOffsetWorldSpace = start + Vector3.new(0, NUMBER_RISE, 0) }):Play()
-	TweenService:Create(label, TweenInfo.new(NUMBER_LIFETIME * 0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.In, 0, false, NUMBER_LIFETIME * 0.5), {
-		TextTransparency = 1,
-		TextStrokeTransparency = 1,
-	}):Play()
+	local fadeInfo = TweenInfo.new(NUMBER_LIFETIME * 0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.In, 0, false, NUMBER_LIFETIME * 0.5)
+	TweenService:Create(label, fadeInfo, { TextTransparency = 1 }):Play()
+	TweenService:Create(stroke, fadeInfo, { Transparency = 1 }):Play()
 end
 
 local function armorSparks(position: Vector3, broken: boolean)
@@ -125,8 +130,9 @@ local function onHit(
 	end
 	-- Os dois números saem lado a lado quando o tiro passa da armadura para a vida
 	local both = toArmor > 0 and toHealth > 0
-	showNumber(position, toArmor, ARMOR_COLOR, if both then -0.6 else 0)
-	showNumber(position, toHealth, if region == "Head" then CRITICAL_COLOR else HEALTH_COLOR, if both then 0.6 else 0)
+	showNumber(position, toArmor, ARMOR_COLOR, if both then -0.6 else 0, false)
+	local isCrit = region == "Head"
+	showNumber(position, toHealth, if isCrit then CRITICAL_COLOR else HEALTH_COLOR, if both then 0.6 else 0, isCrit)
 end
 
 function DamageNumbersController:Start()

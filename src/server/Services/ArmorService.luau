@@ -12,6 +12,7 @@ local Net = require(ReplicatedStorage.Shared.Lib.Net)
 local CombatContract = require(ReplicatedStorage.Shared.Lib.CombatContract)
 local ArmorConfig = require(ReplicatedStorage.Shared.Config.Armor)
 local Damage = require(script.Parent.Parent.Combat.Damage)
+local DownedRules = require(script.Parent.Parent.Combat.DownedRules)
 
 type ArmorHit = CombatContract.ArmorHit
 
@@ -70,10 +71,11 @@ function ArmorService.absorb(model: Model, region: Damage.Region, damage: number
 	return remaining, kind
 end
 
--- Derrubado perde o colete e para de colocar placa
+-- Derrubado perde o colete e o capacete e para de colocar placa
 function ArmorService.strip(model: Model)
 	platingToken[model] = nil
 	model:SetAttribute(ATTR.Vest, 0)
+	model:SetAttribute(ATTR.Helmet, 0)
 	model:SetAttribute(ATTR.Plating, nil)
 end
 
@@ -191,6 +193,10 @@ local function setupCrate(instance: Instance)
 			Net.reportAbuse(player, "PromptArmorCrate", "too_far")
 			return
 		end
+		if not DownedRules.hasLineOfSight(root.Position, part.Position, { character, part }) then
+			Net.reportAbuse(player, "PromptArmorCrate", "no_los")
+			return
+		end
 		local now = os.clock()
 		local last = crateLastUse[player]
 		if last and now - last < ArmorConfig.CrateCooldownSeconds then
@@ -224,6 +230,9 @@ function ArmorService:Start()
 			equipOnSpawn(player, character)
 			givePlateItem(player)
 		end)
+		player.CharacterRemoving:Connect(function(character: Model)
+			platingToken[character] = nil
+		end)
 	end
 	for _, player in Players:GetPlayers() do
 		onPlayer(player)
@@ -231,6 +240,9 @@ function ArmorService:Start()
 	Players.PlayerAdded:Connect(onPlayer)
 	Players.PlayerRemoving:Connect(function(player: Player)
 		crateLastUse[player] = nil
+		if player.Character then
+			platingToken[player.Character] = nil
+		end
 	end)
 
 	local tag = CombatContract.Tags.ArmorCrate

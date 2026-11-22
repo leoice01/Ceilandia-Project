@@ -173,6 +173,16 @@ local function setup(character: Model)
 	end
 	local animator = humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator", humanoid)
 
+	-- Sem ID para todos os clipes (fora do Studio o ID temporário não existe e os clipes
+	-- ainda não foram publicados em AnimationConfig.PublishedIds): mantém a animação padrão
+	-- do Roblox em vez de deixar o personagem sem animação nenhuma.
+	for clipName in AnimationClips do
+		if not idFor(clipName) then
+			warn(("[CharacterAnimationController] clipe %s sem ID publicado: usando a animação padrão do Roblox"):format(clipName))
+			return
+		end
+	end
+
 	-- tira o Animate padrão do Roblox e o que ele já estiver tocando
 	local default = character:FindFirstChild("Animate") or character:WaitForChild("Animate", 2)
 	if default then

@@ -28,14 +28,23 @@ end
 
 -- 1 até FalloffStart, cai linear até FalloffMinMultiplier em FalloffEnd
 function Damage.falloff(distance: number, startDistance: number, endDistance: number, minMultiplier: number): number
+	local cleanMin = if minMultiplier == minMultiplier and math.abs(minMultiplier) < math.huge
+		then math.clamp(minMultiplier, 0, 1)
+		else 1
+	if distance ~= distance then
+		return cleanMin
+	end
+	if startDistance ~= startDistance or endDistance ~= endDistance then
+		return cleanMin
+	end
 	if distance <= startDistance then
 		return 1
 	end
 	if distance >= endDistance or endDistance <= startDistance then
-		return minMultiplier
+		return cleanMin
 	end
-	local alpha = (distance - startDistance) / (endDistance - startDistance)
-	return 1 + (minMultiplier - 1) * alpha
+	local alpha = math.clamp((distance - startDistance) / (endDistance - startDistance), 0, 1)
+	return 1 + (cleanMin - 1) * alpha
 end
 
 -- Dano antes da armadura
@@ -45,14 +54,20 @@ function Damage.compute(weapon: Weapons.WeaponConfig, region: Region, distance: 
 		elseif region == "Torso" then weapon.TorsoMultiplier
 		else weapon.LimbMultiplier
 	local falloff = Damage.falloff(distance, weapon.FalloffStart, weapon.FalloffEnd, weapon.FalloffMinMultiplier)
-	return weapon.Damage * multiplier * falloff
+	local raw = weapon.Damage * multiplier * falloff
+	if raw ~= raw or raw < 0 or math.abs(raw) == math.huge then
+		return 0
+	end
+	return raw
 end
 
 -- A armadura absorve tudo que puder antes da vida (estilo placas).
 -- Retorna a armadura que sobrou e o dano que passa para a vida.
 function Damage.absorb(armor: number, damage: number): (number, number)
-	local absorbed = math.min(math.max(armor, 0), damage)
-	return armor - absorbed, damage - absorbed
+	local cleanArmor = if armor == armor and math.abs(armor) < math.huge then math.max(armor, 0) else 0
+	local cleanDamage = if damage == damage and math.abs(damage) < math.huge then math.max(damage, 0) else 0
+	local absorbed = math.min(cleanArmor, cleanDamage)
+	return cleanArmor - absorbed, cleanDamage - absorbed
 end
 
 return Damage

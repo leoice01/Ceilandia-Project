@@ -8,6 +8,8 @@
 --   ArmorInsertPlate()                pedido de colocar UMA placa no colete; para encher
 --                                     o colete, o cliente manda de novo quando Plating sumir
 --   GrenadeThrow(direction: Vector3)  lançar a granada equipada na direção (vetor unitário)
+--   FactionRequest(payload: FactionRequestPayload)
+--                                     pedido de troca/cancelamento de lado (MaskUp, JoinPolice, GoCivil, Cancel)
 -- Servidor -> cliente
 --   CombatHit(region: HitRegion, result: HitResult, armor: ArmorHit,
 --             armorDamage: number, healthDamage: number, hitPos: Vector3)
@@ -20,30 +22,13 @@
 --       para todos: kill feed (actor = quem derrubou/finalizou/reviveu; nil = sangrou)
 --   CombatDamaged(sourcePos: Vector3, amount: number)
 --       só para quem levou dano: de onde veio (indicador de direção do dano)
---
--- Atributos que só o servidor escreve:
---   Player.Faction (string)        "Civil" | "Policia" | "Bandido"; sem atributo = DefaultFaction
---   Player.Gang (string)           nome da gang; mesma gang = pode reviver
---   Player.PlatesCarried (number)  placas extras na mochila
---   Character.ArmorVest (number)   armadura do colete (placas × PlateHealth); absorve antes da vida
---   Character.ArmorVestMax (number) armadura máxima do colete (para a barra no HUD)
---   Character.Plating (boolean)    colocando placa agora (não atira)
---   Character.ArmorHelmet (number) capacete: absorve dano na cabeça, antes do colete
---   Character.Downed (boolean)     derrubado: rasteja, não atira; Humanoid.Health = sangue que resta
---   Model.Downable (boolean)       NPC/dummy que cai derrubado em vez de morrer (jogadores sempre caem)
---   Tool.Weapon (string), Tool.Ammo (number, no pente), Tool.Reserve (number, fora do pente),
---   Tool.Reloading (boolean), Tool.Slot (string "Primary" | "Secondary")
---
--- Atributos que só o cliente dono escreve (para a pose local; não replicam):
---   Character.Aiming, Character.Firing, Character.Equipping, Character.RecoilKick
---
--- Interação (ProximityPrompt criado pelo servidor na HumanoidRootPart de quem está derrubado):
---   "Revive" (aliado segura E / ButtonX) e "Finish" (inimigo segura F / ButtonY). O cliente pode esconder o prompt
---   que não se aplica ao jogador, mas quem decide é o servidor.
--- Caixa de placas: qualquer BasePart com a tag "ArmorCrate" (CollectionService) ganha um
---   ProximityPrompt "ArmorCrate" (E) que enche as placas da mochila.
+--   FactionStateChanged(player: Player, faction: string, state: string, duration: number?, reason: string?)
+--       para todos (mudança de estado) ou só para o solicitante (motivo de recusa)
+--   FactionTransformFX(player: Player, kind: FactionTransformKind, duration: number)
+--       para jogadores próximos (LOD por raio): efeito de máscara / desmascarar
 
 local Net = require(script.Parent.Net)
+local FactionsConfig = require(script.Parent.Parent.Config.Factions)
 
 export type FirePayload = {
 	origin: Vector3, -- de onde o tiro sai (perto da cabeça/ombro)
@@ -58,10 +43,23 @@ export type HitResult = "Hit" | "Downed" | "Killed"
 export type FeedKind = "Downed" | "Finished" | "BledOut" | "Revived"
 -- "None" = sem armadura; "Hit" = armadura absorveu; "Broken" = uma placa (ou o capacete) quebrou
 export type ArmorHit = "None" | "Hit" | "Broken"
+export type FactionAction = "MaskUp" | "JoinPolice" | "GoCivil" | "Cancel"
+export type FactionState = "Idle" | "Transforming" | "Unmasking"
+export type FactionTransformKind = "MaskUp" | "Unmask"
+export type FactionRequestPayload = {
+	action: FactionAction,
+}
 
 local MAX_WEAPON_ID_LENGTH = 32
 local FIRE_PAYLOAD_FIELDS = 5
 local MAX_SEQ = 2 ^ 31
+local FACTION_REQUEST_FIELDS = 1
+local VALID_FACTION_ACTIONS: { [string]: boolean } = {
+	MaskUp = true,
+	JoinPolice = true,
+	GoCivil = true,
+	Cancel = true,
+}
 
 local CombatContract = {
 	Remotes = {
@@ -73,23 +71,24 @@ local CombatContract = {
 		Damaged = "CombatDamaged",
 		InsertPlate = "ArmorInsertPlate",
 		GrenadeThrow = "GrenadeThrow",
+		FactionRequest = "FactionRequest",
+		FactionStateChanged = "FactionStateChanged",
+		FactionTransformFX = "FactionTransformFX",
 	},
 	Prompts = {
 		Revive = "Revive",
 		Finish = "Finish",
 		ArmorCrate = "ArmorCrate",
+		PoliceStation = "PoliceStation",
 	},
 	Tags = {
 		ArmorCrate = "ArmorCrate",
+		PoliceStation = "PoliceStation",
 	},
-	-- Item de colocar placa: Tool criada pelo servidor na mochila a cada spawn.
-	-- O cliente manda ArmorInsertPlate ao clicar (segurando = enche o colete).
 	PlateItem = {
 		Name = "Placas",
 		Attribute = "PlateItem",
 	},
-	-- Granada: Tool criada pelo servidor a cada spawn; o nome mostra quantas restam.
-	-- Player.GrenadesCarried (number) = granadas na mochila.
 	GrenadeItem = {
 		Name = "Granada",
 		Attribute = "GrenadeItem",
@@ -100,10 +99,21 @@ local CombatContract = {
 		Police = "Policia",
 		Robber = "Bandido",
 	},
-	-- Na Fase 0 todo mundo sem facção pode trocar tiro
-	DefaultFaction = "Bandido",
+	FactionStates = {
+		Idle = "Idle",
+		Transforming = "Transforming",
+		Unmasking = "Unmasking",
+	},
+	-- Facção padrão controlada por Shared.Config.Factions
+	DefaultFaction = if FactionsConfig.Phase0AutoBandit then "Bandido" else FactionsConfig.DefaultSpawnFaction,
 	Attributes = {
 		Faction = "Faction",
+		FactionState = "FactionState",
+		InCombatUntil = "InCombatUntil",
+		WantedLevel = "WantedLevel",
+		DirtyCash = "DirtyCash",
+		StolenItemsCount = "StolenItemsCount",
+		PoliceBonusMultiplier = "PoliceBonusMultiplier",
 		Gang = "Gang",
 		Downable = "Downable",
 		Vest = "ArmorVest",
@@ -121,7 +131,11 @@ local CombatContract = {
 }
 
 -- Confere formato e tipos do payload de tiro (não confere regra de jogo)
-function CombatContract.validateFire(payload: any): (boolean, string?)
+function CombatContract.validateFire(...: any): (boolean, string?)
+	if select("#", ...) ~= 1 then
+		return false, "unexpected_args"
+	end
+	local payload = ...
 	if typeof(payload) ~= "table" then
 		return false, "payload_not_table"
 	end
@@ -151,6 +165,28 @@ function CombatContract.validateFire(payload: any): (boolean, string?)
 	local seq = payload.seq
 	if not Net.isFiniteNumber(seq) or seq ~= math.floor(seq) or seq < 0 or seq > MAX_SEQ then
 		return false, "bad_seq"
+	end
+	return true, nil
+end
+
+-- Confere formato e ação válida do pedido de escolha de lado
+function CombatContract.validateFactionRequest(payload: any, ...: any): (boolean, string?)
+	if select("#", ...) ~= 0 then
+		return false, "unexpected_args"
+	end
+	if typeof(payload) ~= "table" then
+		return false, "payload_not_table"
+	end
+	local fields = 0
+	for _ in payload do
+		fields += 1
+		if fields > FACTION_REQUEST_FIELDS then
+			return false, "payload_extra_fields"
+		end
+	end
+	local action = payload.action
+	if typeof(action) ~= "string" or not VALID_FACTION_ACTIONS[action] then
+		return false, "bad_action"
 	end
 	return true, nil
 end

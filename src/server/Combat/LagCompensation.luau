@@ -8,9 +8,11 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local CombatConfig = require(ReplicatedStorage.Shared.Config.Combat)
+local RayHitbox = require(script.Parent.RayHitbox)
 
 type Snapshot = {
 	t: number,
+	rootCFrame: CFrame?,
 	cframes: { [BasePart]: CFrame },
 }
 
@@ -22,14 +24,16 @@ type History = {
 	count: number,
 }
 
+type PoseTransform = {
+	body: CFrame,
+	rightLeg: CFrame,
+	leftLeg: CFrame,
+}
+
 local SLOT_COUNT = math.ceil(CombatConfig.HistorySeconds * CombatConfig.HistoryHz) + 2
 local RECORD_INTERVAL = 1 / CombatConfig.HistoryHz
 local EPSILON = 1e-9
 
--- Pose do corpo que o PoseAnimator (cliente) desenha agachado e no slide. O servidor não
--- vê essas poses (são só C0 nos clientes), então aplica a mesma transformação na hitbox.
--- Agachado: mesmos valores de Shared/Config/AnimationClips. Slide e derrubado: mesmos
--- valores do PoseAnimator legado. Se mudar lá, mude aqui.
 type BodyPose = { drop: number, lean: number, rightLeg: number, leftLeg: number }
 -- agachado = ajoelhado sobre as pernas; mesmos valores de Shared/Config/AnimationClips
 local CROUCH_POSE: BodyPose = { drop = 1.5, lean = math.rad(-5), rightLeg = math.rad(-88), leftLeg = math.rad(-92) }
@@ -38,8 +42,6 @@ local SLIDE_POSE: BodyPose = { drop = 1.3, lean = math.rad(40), rightLeg = math.
 local DOWNED_POSE: BodyPose = { drop = 2.5, lean = math.rad(-90), rightLeg = 0, leftLeg = 0 }
 local RIGHT_HIP = CFrame.new(0.5, -1, 0) -- quadril no espaço do Torso (R6)
 local LEFT_HIP = CFrame.new(-0.5, -1, 0)
-
-type Poser = (BasePart) -> CFrame
 
 local LagCompensation = {}
 
@@ -59,9 +61,8 @@ local function bodyPoseOf(character: Model): BodyPose?
 	return nil
 end
 
--- Devolve uma função que leva a CFrame de pé de cada parte para a CFrame posada,
--- ou nil se o personagem está de pé (ou não é R6, igual ao PoseAnimator)
-local function poserFor(character: Model): Poser?
+-- Calcula os CFrames de transformação da pose R6 uma única vez (sem closure no hot-path)
+local function poseTransformFor(character: Model): PoseTransform?
 	local pose = bodyPoseOf(character)
 	if not pose then
 		return nil
@@ -71,37 +72,41 @@ local function poserFor(character: Model): Poser?
 	if not (root and root:IsA("BasePart") and torso and torso:IsA("BasePart")) then
 		return nil
 	end
-	-- corpo desce e inclina em volta da HumanoidRootPart (como o RootJoint.C0 no cliente)
 	local rootCf = root.CFrame
-	local body = rootCf * CFrame.new(0, -pose.drop, 0) * CFrame.Angles(pose.lean, 0, 0) * rootCf:Inverse()
-	-- pernas giram no quadril (como Right/Left Hip.C0 no cliente)
 	local torsoCf = torso.CFrame
-	local rightLeg = torsoCf * RIGHT_HIP * CFrame.Angles(pose.rightLeg, 0, 0) * RIGHT_HIP:Inverse() * torsoCf:Inverse()
-	local leftLeg = torsoCf * LEFT_HIP * CFrame.Angles(pose.leftLeg, 0, 0) * LEFT_HIP:Inverse() * torsoCf:Inverse()
-	return function(part: BasePart): CFrame
-		local cf = part.CFrame
-		if part.Name == "Right Leg" then
-			cf = rightLeg * cf
-		elseif part.Name == "Left Leg" then
-			cf = leftLeg * cf
-		end
-		return body * cf
+	return {
+		body = rootCf * CFrame.new(0, -pose.drop, 0) * CFrame.Angles(pose.lean, 0, 0) * rootCf:Inverse(),
+		rightLeg = torsoCf * RIGHT_HIP * CFrame.Angles(pose.rightLeg, 0, 0) * RIGHT_HIP:Inverse() * torsoCf:Inverse(),
+		leftLeg = torsoCf * LEFT_HIP * CFrame.Angles(pose.leftLeg, 0, 0) * LEFT_HIP:Inverse() * torsoCf:Inverse(),
+	}
+end
+
+local function applyPose(part: BasePart, pose: PoseTransform?): CFrame
+	local cf = part.CFrame
+	if not pose then
+		return cf
 	end
+	if part.Name == "Right Leg" then
+		cf = pose.rightLeg * cf
+	elseif part.Name == "Left Leg" then
+		cf = pose.leftLeg * cf
+	end
+	return pose.body * cf
 end
 
 local function newHistory(): History
 	local ring: { Snapshot } = table.create(SLOT_COUNT)
 	for i = 1, SLOT_COUNT do
-		ring[i] = { t = -math.huge, cframes = {} }
+		ring[i] = { t = -math.huge, rootCFrame = nil, cframes = {} }
 	end
 	return { parts = {}, partsDirty = true, ring = ring, newest = 0, count = 0 }
 end
 
--- Partes do corpo que contam como alvo (sem a HumanoidRootPart, que é invisível)
+-- Partes do corpo consultáveis que contam como alvo (sem HumanoidRootPart nem CanQuery = false)
 local function collectParts(character: Model): { BasePart }
 	local list = {}
 	for _, child in character:GetChildren() do
-		if child:IsA("BasePart") and child.Name ~= "HumanoidRootPart" then
+		if child:IsA("BasePart") and child.Name ~= "HumanoidRootPart" and child.CanQuery then
 			table.insert(list, child)
 		end
 	end
@@ -111,7 +116,6 @@ end
 local function track(character: Model)
 	local history = newHistory()
 	histories[character] = history
-	-- R15 monta as partes aos poucos; refaz a lista quando mudar
 	character.ChildAdded:Connect(function()
 		history.partsDirty = true
 	end)
@@ -133,106 +137,110 @@ local function record(now: number)
 		history.newest = history.newest % SLOT_COUNT + 1
 		local snapshot = history.ring[history.newest]
 		snapshot.t = now
+		local root = character:FindFirstChild("HumanoidRootPart")
+		snapshot.rootCFrame = if root and root:IsA("BasePart") then root.CFrame else nil
 		table.clear(snapshot.cframes)
-		local poser = poserFor(character)
+		local pose = poseTransformFor(character)
 		for _, part in history.parts do
-			snapshot.cframes[part] = if poser then poser(part) else part.CFrame
+			if part.Parent == character and part.CanQuery then
+				snapshot.cframes[part] = applyPose(part, pose)
+			end
 		end
 		history.count = math.min(history.count + 1, SLOT_COUNT)
 	end
 end
 
--- CFrame de uma parte no tempo t, interpolando entre dois snapshots.
--- live = posição atual já com a pose do corpo (para quando t é mais novo que o histórico).
-local function cframeAt(history: History, part: BasePart, t: number, live: Poser): CFrame
-	if history.count == 0 then
-		return live(part)
+-- Resolve o par de snapshots uma única vez por personagem.
+-- Quando t > newestSnap.t e t < now, interpola newestSnap -> posição ao vivo (useLiveB = true).
+local function resolveSample(history: History?, t: number, now: number): (Snapshot?, Snapshot?, number, boolean)
+	if not history or history.count == 0 or t >= now then
+		return nil, nil, 1, true
 	end
-	local newerSnap: Snapshot? = nil
-	local index = history.newest
-	for _ = 1, history.count do
+	local newestSnap = history.ring[history.newest]
+	if t >= newestSnap.t then
+		local span = now - newestSnap.t
+		local alpha = if span > EPSILON then math.clamp((t - newestSnap.t) / span, 0, 1) else 1
+		return newestSnap, nil, alpha, true
+	end
+
+	local newerSnap: Snapshot = newestSnap
+	local index = if history.newest == 1 then SLOT_COUNT else history.newest - 1
+	for _ = 2, history.count do
 		local snap = history.ring[index]
-		local cf = snap.cframes[part]
 		if snap.t <= t then
-			if not cf then
-				return live(part)
-			end
-			if not newerSnap then
-				-- t é mais novo que o último snapshot: usa a posição atual
-				return live(part)
-			end
-			local newerCf = newerSnap.cframes[part]
-			if not newerCf then
-				return cf
-			end
 			local span = newerSnap.t - snap.t
-			local alpha = if span > EPSILON then (t - snap.t) / span else 0
-			return cf:Lerp(newerCf, alpha)
+			local alpha = if span > EPSILON then math.clamp((t - snap.t) / span, 0, 1) else 0
+			return snap, newerSnap, alpha, false
 		end
 		newerSnap = snap
 		index = if index == 1 then SLOT_COUNT else index - 1
 	end
+
 	-- t é mais velho que o histórico todo: usa o snapshot mais antigo
-	if newerSnap then
-		local oldest = newerSnap.cframes[part]
-		if oldest then
-			return oldest
-		end
-	end
-	return live(part)
+	return newerSnap, nil, 0, false
 end
 
--- Teste raio x caixa orientada (slab). dir é o raio inteiro (direção * alcance).
--- Retorna a fração [0, 1] do raio onde entra na caixa, ou nil.
-local function rayBoxFraction(cf: CFrame, size: Vector3, origin: Vector3, dir: Vector3): number?
-	local o = cf:PointToObjectSpace(origin)
-	local d = cf:VectorToObjectSpace(dir)
-	local half = size * 0.5
-	local tMin, tMax = 0, 1
-
-	local function slab(oAxis: number, dAxis: number, halfAxis: number): boolean
-		if math.abs(dAxis) < EPSILON then
-			return math.abs(oAxis) <= halfAxis
-		end
-		local t1 = (-halfAxis - oAxis) / dAxis
-		local t2 = (halfAxis - oAxis) / dAxis
-		if t1 > t2 then
-			t1, t2 = t2, t1
-		end
-		tMin = math.max(tMin, t1)
-		tMax = math.min(tMax, t2)
-		return tMin <= tMax
+local function sampleRootPosition(character: Model, snapA: Snapshot?, snapB: Snapshot?, alpha: number, useLiveB: boolean): Vector3?
+	local root = character:FindFirstChild("HumanoidRootPart")
+	local livePos = if root and root:IsA("BasePart") then root.Position else nil
+	local cfA = if snapA then snapA.rootCFrame else nil
+	if not cfA then
+		return livePos
 	end
-
-	if not slab(o.X, d.X, half.X) then
-		return nil
+	if useLiveB then
+		return if livePos then cfA.Position:Lerp(livePos, alpha) else cfA.Position
 	end
-	if not slab(o.Y, d.Y, half.Y) then
-		return nil
+	if snapB and snapB.rootCFrame then
+		return cfA.Position:Lerp(snapB.rootCFrame.Position, alpha)
 	end
-	if not slab(o.Z, d.Z, half.Z) then
-		return nil
-	end
-	return tMin
+	return cfA.Position
 end
 
--- Testa o raio contra o personagem como ele estava no tempo t.
--- Retorna a parte atingida mais próxima e a distância até ela (studs).
-function LagCompensation.raycastCharacter(character: Model, t: number, origin: Vector3, dir: Vector3): (BasePart?, number?)
+local function samplePartCFrame(part: BasePart, pose: PoseTransform?, snapA: Snapshot?, snapB: Snapshot?, alpha: number, useLiveB: boolean): CFrame
+	local cfA = if snapA then snapA.cframes[part] else nil
+	if not cfA then
+		return applyPose(part, pose)
+	end
+	if useLiveB then
+		return cfA:Lerp(applyPose(part, pose), alpha)
+	end
+	local cfB = if snapB then snapB.cframes[part] else nil
+	return if cfB then cfA:Lerp(cfB, alpha) else cfA
+end
+
+-- Testa o raio contra o personagem no tempo t com broadphase pelo root rebobinado.
+-- dirUnit deve ser unitário; maxDist limita o segmento testado.
+function LagCompensation.raycastCharacter(character: Model, t: number, origin: Vector3, dirUnit: Vector3, maxDist: number, broadphaseRadius: number?): (BasePart?, number?)
+	if maxDist <= 0 then
+		return nil, nil
+	end
 	local history = histories[character]
+	local now = workspace:GetServerTimeNow()
+	local snapA, snapB, alpha, useLiveB = resolveSample(history, t, now)
+
+	local radius = if broadphaseRadius ~= nil then broadphaseRadius else CombatConfig.BroadphaseRadius
+	if radius > 0 then
+		local rootPos = sampleRootPosition(character, snapA, snapB, alpha, useLiveB)
+		if rootPos then
+			local toRoot = rootPos - origin
+			local proj = math.clamp(toRoot:Dot(dirUnit), 0, maxDist)
+			local perp = toRoot - dirUnit * proj
+			if perp:Dot(perp) > radius * radius then
+				return nil, nil
+			end
+		end
+	end
+
 	local parts = if history then history.parts else collectParts(character)
-	local length = dir.Magnitude
+	local pose = poseTransformFor(character)
+	local ray = dirUnit * maxDist
 	local bestPart: BasePart? = nil
 	local bestFraction = math.huge
-	local poser = poserFor(character)
-	local function live(part: BasePart): CFrame
-		return if poser then poser(part) else part.CFrame
-	end
 
 	for _, part in parts do
-		if part.Parent == character then
-			local cf = if history then cframeAt(history, part, t, live) else live(part)
-			local fraction = rayBoxFraction(cf, part.Size, origin, dir)
+		if part.Parent == character and part.CanQuery then
+			local cf = samplePartCFrame(part, pose, snapA, snapB, alpha, useLiveB)
+			local fraction = RayHitbox.rayBoxFraction(cf, part.Size, origin, ray)
 			if fraction and fraction < bestFraction then
 				bestFraction = fraction
 				bestPart = part
@@ -241,7 +249,7 @@ function LagCompensation.raycastCharacter(character: Model, t: number, origin: V
 	end
 
 	if bestPart then
-		return bestPart, bestFraction * length
+		return bestPart, bestFraction * maxDist
 	end
 	return nil, nil
 end
@@ -249,15 +257,40 @@ end
 -- CFrame atual de uma parte com a pose do corpo que o cliente desenha (agachado, slide,
 -- derrubado). Usado para conferir a origem do tiro contra a cabeça "de verdade".
 function LagCompensation.posedCFrame(character: Model, part: BasePart): CFrame
-	local poser = poserFor(character)
-	return if poser then poser(part) else part.CFrame
+	local pose = poseTransformFor(character)
+	return applyPose(part, pose)
 end
 
--- Tempo no servidor para reconstruir os alvos, a partir do timestamp do cliente
-function LagCompensation.rewindTime(clientTimestamp: number): number
+-- Cálculo puro do rewind em segundos (testável isoladamente).
+-- Sem clientAgeSeconds: clamp(ping + InterpolationDelay, 0, MaxRewindSeconds).
+-- Com clientAgeSeconds (CombatFire): nunca passa de ping + InterpolationDelay + ClientTimestampSlack nem MaxRewindSeconds.
+function LagCompensation.computeRewindSeconds(pingSeconds: number, clientAgeSeconds: number?): number
+	local ping = if pingSeconds == pingSeconds and pingSeconds > 0 and pingSeconds < math.huge then pingSeconds else 0
+	local pingRewind = math.clamp(ping + CombatConfig.InterpolationDelay, 0, CombatConfig.MaxRewindSeconds)
+	if clientAgeSeconds == nil then
+		return pingRewind
+	end
+	local maxAllowed = math.min(
+		CombatConfig.MaxRewindSeconds,
+		ping + CombatConfig.InterpolationDelay + CombatConfig.ClientTimestampSlack
+	)
+	local desired = clientAgeSeconds + CombatConfig.InterpolationDelay
+	if desired ~= desired or math.abs(desired) == math.huge then
+		return pingRewind
+	end
+	return math.clamp(desired, 0, maxAllowed)
+end
+
+-- Tempo no servidor para reconstruir os alvos usando ping real (e timestamp do cliente quando enviado)
+function LagCompensation.rewindTime(player: Player, clientTimestamp: number?): number
 	local now = workspace:GetServerTimeNow()
-	local target = clientTimestamp - CombatConfig.InterpolationDelay
-	local rewind = math.clamp(now - target, 0, CombatConfig.MaxRewindSeconds)
+	local ping = player:GetNetworkPing()
+	local clientAge: number? = if clientTimestamp ~= nil then (now - clientTimestamp) else nil
+	local rewind = LagCompensation.computeRewindSeconds(ping, clientAge)
+	if CombatConfig.Debug and CombatConfig.Debug.LogLagComp then
+		local mode = if clientTimestamp ~= nil then "client_clamped" else "ping"
+		print(("[LagComp] %s ping=%.0fms rewind=%.0fms mode=%s"):format(player.Name, ping * 1000, rewind * 1000, mode))
+	end
 	return now - rewind
 end
 

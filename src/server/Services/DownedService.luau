@@ -1,7 +1,7 @@
 --!strict
 -- Estado derrubado: quando um tiro zeraria a vida, o personagem cai em vez de morrer.
--- Derrubado rasteja, não atira e sangra (Humanoid.Health cai até zero). Um aliado
--- revive segurando um botão; um inimigo finaliza segurando outro botão ou atirando.
+-- Derrubado rasteja, não atira/reequipa arma e sangra. Aliado revive segurando E;
+-- inimigo finaliza segurando F ou atirando. Validação contínua de distância, LoS e hold.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -10,29 +10,34 @@ local RunService = game:GetService("RunService")
 local Net = require(ReplicatedStorage.Shared.Lib.Net)
 local CombatContract = require(ReplicatedStorage.Shared.Lib.CombatContract)
 local DownedConfig = require(ReplicatedStorage.Shared.Config.Downed)
-local Factions = require(script.Parent.Parent.Combat.Factions)
+local Combat = script.Parent.Parent.Combat
+local Factions = require(Combat.Factions)
+local DownedRules = require(Combat.DownedRules)
+local DownedPrompts = require(Combat.DownedPrompts)
 local ArmorService = require(script.Parent.ArmorService)
+local KillFeedService = require(script.Parent.KillFeedService)
+local FactionService = require(script.Parent.FactionService)
 local WantedService = require(script.Parent.WantedService)
 
 type FeedKind = CombatContract.FeedKind
+type ActiveHold = DownedPrompts.ActiveHold
 
 type DownedState = {
 	model: Model,
 	humanoid: Humanoid,
 	player: Player?,
-	walkSpeed: number,
 	jumpPower: number,
 	jumpHeight: number,
 	maxHealth: number,
 	regenScript: Script?,
 	prompts: { ProximityPrompt },
-	holds: { [ProximityPrompt]: { [Player]: number } },
+	holds: { [ProximityPrompt]: { [Player]: ActiveHold } },
 	connections: { RBXScriptConnection },
 }
 
 local ATTR = CombatContract.Attributes
 local PROMPTS = CombatContract.Prompts
-local BLEED_TICK = 0.1 -- de quanto em quanto tempo a vida do derrubado é atualizada (s)
+local TICK_INTERVAL = DownedConfig.HoldCheckInterval or 0.1
 local DISTANCE_SLACK = 2 -- folga na distância de interação para variação de rede (studs)
 
 local DownedService = {}
@@ -49,24 +54,22 @@ local function rootOf(model: Model): BasePart?
 	return if root and root:IsA("BasePart") then root else nil
 end
 
--- Sai do estado derrubado. restore = levantou (volta velocidade, pulo e regeneração).
+-- Sai do estado derrubado. restore = levantou (volta WalkSpeed base, pulo e regeneração).
 local function clear(state: DownedState, restore: boolean)
 	if downed[state.model] ~= state then
 		return
 	end
 	downed[state.model] = nil
+	DownedPrompts.clearOwner(state)
 	for _, connection in state.connections do
 		connection:Disconnect()
-	end
-	for _, prompt in state.prompts do
-		prompt:Destroy()
 	end
 	if state.model.Parent then
 		state.model:SetAttribute(ATTR.Downed, nil)
 	end
 	if restore then
 		state.humanoid.MaxHealth = state.maxHealth
-		state.humanoid.WalkSpeed = state.walkSpeed
+		state.humanoid.WalkSpeed = DownedConfig.BaseWalkSpeed
 		state.humanoid.JumpPower = state.jumpPower
 		state.humanoid.JumpHeight = state.jumpHeight
 		if state.regenScript then
@@ -75,96 +78,52 @@ local function clear(state: DownedState, restore: boolean)
 	end
 end
 
--- Quem interage precisa estar vivo, de pé e perto de quem está no chão
-local function canInteract(interactor: Player, state: DownedState): boolean
+-- Quem interage precisa estar vivo, de pé, perto e com linha de visão desobstruída
+local function evaluateInteract(interactor: Player, state: DownedState): (boolean, string?)
 	local character = interactor.Character
-	if not character or character == state.model or downed[character] then
-		return false
+	if not character then
+		return false, "no_character"
 	end
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if not humanoid or humanoid.Health <= 0 then
-		return false
-	end
+	local alive = humanoid ~= nil and humanoid.Health > 0
+	local isDowned = downed[character] ~= nil or character:GetAttribute(ATTR.Downed) == true
 	local from, to = rootOf(character), rootOf(state.model)
 	if not from or not to then
-		return false
+		return false, "missing_root"
 	end
-	return (from.Position - to.Position).Magnitude <= DownedConfig.InteractDistance + DISTANCE_SLACK
+	local distance = (from.Position - to.Position).Magnitude
+	local maxDist = DownedConfig.InteractDistance + DISTANCE_SLACK
+	local hasLos = distance <= maxDist and DownedRules.hasLineOfSight(from.Position, to.Position, { character, state.model })
+	return DownedRules.canInteract({
+		interactorAlive = alive,
+		interactorDowned = isDowned,
+		isSameModel = character == state.model,
+		distance = distance,
+		maxDistance = maxDist,
+		hasLineOfSight = hasLos,
+	})
 end
 
 local function revive(state: DownedState, by: Player)
+	pcall(KillFeedService.clearNote, KillFeedService, state.model)
 	clear(state, true)
 	state.humanoid.Health = math.min(DownedConfig.ReviveHealth, state.humanoid.MaxHealth)
 	feed("Revived", by, state.model.Name)
 end
 
 local function kill(state: DownedState, kind: FeedKind, by: Player?)
+	if kind == "Finished" and by then
+		local killerRoot = by.Character and rootOf(by.Character)
+		local victimRoot = rootOf(state.model)
+		local distance: number? = if killerRoot and victimRoot
+			then (killerRoot.Position - victimRoot.Position).Magnitude
+			else nil
+		pcall(KillFeedService.noteLethalHit, KillFeedService, state.model, by, "Finalização", distance, false, false)
+		pcall(WantedService.onFinished, by, state.model, state.player)
+	end
 	clear(state, false)
 	state.humanoid.Health = 0
 	feed(kind, by, state.model.Name)
-end
-
--- Cria um botão de segurar. O cliente controla o tempo de segurar, então o servidor
--- mede de novo pelo HoldBegan/HoldEnded e recusa quem disparou cedo demais.
-local function addPrompt(
-	state: DownedState,
-	root: BasePart,
-	name: string,
-	actionText: string,
-	holdSeconds: number,
-	keyboardKey: Enum.KeyCode,
-	gamepadKey: Enum.KeyCode,
-	allowed: (Player) -> boolean,
-	onDone: (Player) -> ()
-)
-	local prompt = Instance.new("ProximityPrompt")
-	prompt.Name = name
-	prompt.ActionText = actionText
-	prompt.ObjectText = state.model.Name
-	prompt.HoldDuration = holdSeconds
-	-- Reviver e Finalizar ficam na mesma parte: teclas diferentes e os dois visíveis,
-	-- senão o Roblox mostra só um botão por tecla e o outro some
-	prompt.KeyboardKeyCode = keyboardKey
-	prompt.GamepadKeyCode = gamepadKey
-	prompt.Exclusivity = Enum.ProximityPromptExclusivity.AlwaysShow
-	prompt.MaxActivationDistance = DownedConfig.InteractDistance
-	prompt.RequiresLineOfSight = false
-	prompt.Parent = root
-
-	local holds: { [Player]: number } = {}
-	state.holds[prompt] = holds
-	table.insert(state.prompts, prompt)
-	local minimumHold = holdSeconds * (1 - DownedConfig.HoldTolerance)
-
-	table.insert(state.connections, prompt.PromptButtonHoldBegan:Connect(function(player: Player)
-		holds[player] = os.clock()
-	end))
-	table.insert(state.connections, prompt.PromptButtonHoldEnded:Connect(function(player: Player)
-		-- Soltou antes do tempo: invalida o começo
-		local began = holds[player]
-		if began and os.clock() - began < minimumHold then
-			holds[player] = nil
-		end
-	end))
-	table.insert(state.connections, prompt.Triggered:Connect(function(player: Player)
-		local began = holds[player]
-		holds[player] = nil
-		if downed[state.model] ~= state then
-			return
-		end
-		if not began or os.clock() - began < minimumHold then
-			Net.reportAbuse(player, "Prompt" .. name, "hold_too_short")
-			return
-		end
-		if not canInteract(player, state) then
-			Net.reportAbuse(player, "Prompt" .. name, "too_far_or_invalid")
-			return
-		end
-		if not allowed(player) then
-			return
-		end
-		onDone(player)
-	end))
 end
 
 function DownedService.isDownable(model: Model): boolean
@@ -178,18 +137,38 @@ function DownedService.isDowned(model: Model): boolean
 	return downed[model] ~= nil
 end
 
+function DownedService.canInteract(interactor: Player, model: Model): (boolean, string?)
+	local state = downed[model]
+	if not state then
+		return false, "not_downed"
+	end
+	return evaluateInteract(interactor, state)
+end
+
+function DownedService.isInteracting(player: Player): boolean
+	return DownedPrompts.isInteracting(player)
+end
+
+function DownedService.cancelInteractor(player: Player)
+	DownedPrompts.cancelInteractor(player, downed :: any)
+end
+
 -- Derruba o modelo. attacker = quem deu o tiro (para o kill feed).
 function DownedService.down(model: Model, humanoid: Humanoid, attacker: Player?)
 	if downed[model] or humanoid.Health <= 0 then
 		return
+	end
+	local victimPlayer = Players:GetPlayerFromCharacter(model)
+	if victimPlayer then
+		DownedService.cancelInteractor(victimPlayer)
+		pcall(FactionService.cancelTransition, victimPlayer, "downed")
 	end
 	local root = rootOf(model)
 	local regen = model:FindFirstChild("Health")
 	local state: DownedState = {
 		model = model,
 		humanoid = humanoid,
-		player = Players:GetPlayerFromCharacter(model),
-		walkSpeed = humanoid.WalkSpeed,
+		player = victimPlayer,
 		maxHealth = humanoid.MaxHealth,
 		jumpPower = humanoid.JumpPower,
 		jumpHeight = humanoid.JumpHeight,
@@ -204,48 +183,52 @@ function DownedService.down(model: Model, humanoid: Humanoid, attacker: Player?)
 	humanoid.WalkSpeed = DownedConfig.CrawlSpeed
 	humanoid.JumpPower = 0
 	humanoid.JumpHeight = 0
-	-- A regeneração padrão do Roblox curaria o sangramento
 	if state.regenScript then
 		state.regenScript.Enabled = false
 	end
-	-- o sangue do derrubado pode passar da vida normal (Rob Run: 150), então a vida
-	-- máxima sobe enquanto está no chão e volta ao levantar
 	humanoid.MaxHealth = DownedConfig.DownedHealth
 	humanoid.Health = DownedConfig.DownedHealth
-	-- Caiu = placas quebradas; tiros no chão vão direto no sangue
 	ArmorService.strip(model)
 	model:SetAttribute(ATTR.Downed, true)
 
+	-- Impede reequipar qualquer Tool enquanto está no chão
+	table.insert(state.connections, model.ChildAdded:Connect(function(child: Instance)
+		if child:IsA("Tool") and downed[model] == state then
+			task.defer(function()
+				if downed[model] == state and child.Parent == model then
+					humanoid:UnequipTools()
+				end
+			end)
+		end
+	end))
+
 	local victim = state.player
 	if root then
-		addPrompt(state, root, PROMPTS.Revive, "Reviver", DownedConfig.ReviveHoldSeconds, Enum.KeyCode.E, Enum.KeyCode.ButtonX, function(player: Player): boolean
-			-- NPC de teste pode ser revivido por qualquer um que não seja civil
-			if not victim then
-				return Factions.canDamage(player, nil)
-			end
-			return Factions.areAllies(player, victim)
-		end, function(player: Player)
-			revive(state, player)
-		end)
-		addPrompt(state, root, PROMPTS.Finish, "Finalizar", DownedConfig.FinishHoldSeconds, Enum.KeyCode.F, Enum.KeyCode.ButtonY, function(player: Player): boolean
-			return Factions.canDamage(player, victim)
-		end, function(player: Player)
-			kill(state, "Finished", player)
-			WantedService.onFinished(player, state.model, state.player)
-		end)
+		local isActive = function(): boolean return downed[model] == state end
+		local evalFor = function(player: Player): (boolean, string?) return evaluateInteract(player, state) end
+		DownedPrompts.attach(state, root, {
+			name = PROMPTS.Revive, actionText = "Reviver", holdSeconds = DownedConfig.ReviveHoldSeconds,
+			keyboardKey = Enum.KeyCode.E, gamepadKey = Enum.KeyCode.ButtonX,
+			allowed = function(player: Player): boolean
+				return if not victim then Factions.canDamage(player, nil) else Factions.areAllies(player, victim)
+			end,
+			onDone = function(player: Player) revive(state, player) end,
+		}, isActive, evalFor)
+		DownedPrompts.attach(state, root, {
+			name = PROMPTS.Finish, actionText = "Finalizar", holdSeconds = DownedConfig.FinishHoldSeconds,
+			keyboardKey = Enum.KeyCode.F, gamepadKey = Enum.KeyCode.ButtonY,
+			allowed = function(player: Player): boolean return Factions.canFinish(player, victim) end,
+			onDone = function(player: Player) kill(state, "Finished", player) end,
+		}, isActive, evalFor)
 	end
 
-	table.insert(state.connections, humanoid.Died:Connect(function()
-		clear(state, false)
-	end))
-	table.insert(state.connections, model.Destroying:Connect(function()
-		clear(state, false)
-	end))
+	table.insert(state.connections, humanoid.Died:Connect(function() clear(state, false) end))
+	table.insert(state.connections, model.Destroying:Connect(function() clear(state, false) end))
 
 	feed("Downed", attacker, model.Name)
 end
 
--- Chamado pelo combate quando um tiro mata quem já estava derrubado
+-- Chamado pelo combate ANTES de zerar a vida de quem já estava derrubado
 function DownedService.finishedByShot(model: Model, attacker: Player)
 	local state = downed[model]
 	if not state then
@@ -260,16 +243,24 @@ function DownedService:Init()
 end
 
 function DownedService:Start()
+	Players.PlayerRemoving:Connect(function(player: Player)
+		DownedService.cancelInteractor(player)
+	end)
+
 	local bleedPerSecond = DownedConfig.DownedHealth / DownedConfig.BleedOutSeconds
 	local accumulator = 0
 	RunService.Heartbeat:Connect(function(dt: number)
 		accumulator += dt
-		if accumulator < BLEED_TICK then
+		if accumulator < TICK_INTERVAL then
 			return
 		end
 		local step = accumulator
 		accumulator = 0
+		local now = os.clock()
 		for _, state in downed do
+			DownedPrompts.tickOwner(state, now, function(player: Player): (boolean, string?)
+				return evaluateInteract(player, state)
+			end)
 			local health = state.humanoid.Health - bleedPerSecond * step
 			if health <= 0 then
 				kill(state, "BledOut", nil)
