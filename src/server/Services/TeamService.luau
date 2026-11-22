@@ -343,6 +343,7 @@ local function addPrompt(part: BasePart, name: string, action: string, to: Side)
 	prompt.MaxActivationDistance = TeamsConfig.PromptDistance
 	prompt.RequiresLineOfSight = false
 	prompt.KeyboardKeyCode = Enum.KeyCode.E
+	prompt.Style = Enum.ProximityPromptStyle.Custom -- desenhado pelo PromptController
 	prompt.Parent = part
 	prompt.Triggered:Connect(function(player: Player)
 		local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart") :: BasePart?

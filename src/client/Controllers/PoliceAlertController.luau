@@ -6,8 +6,9 @@
 
 local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local StarterGui = game:GetService("StarterGui")
 local Debris = game:GetService("Debris")
+
+local NoticeController = require(script.Parent:WaitForChild("NoticeController"))
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Net = require(Shared:WaitForChild("Lib"):WaitForChild("Net"))
@@ -29,10 +30,9 @@ local PoliceAlertController = {}
 
 local folder: Folder
 
+-- notificação do Roblox, com o painel de reserva do NoticeController se ela não carregar
 local function notify(title: string, text: string)
-	pcall(function()
-		StarterGui:SetCore("SendNotification", { Title = title, Text = text, Duration = 6 })
-	end)
+	NoticeController.show(title, text)
 end
 
 -- ocorrências conhecidas por este policial (id -> último estado) e seus pinos

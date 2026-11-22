@@ -211,6 +211,7 @@ local function setup(instance: Instance)
 	prompt.MaxActivationDistance = math.max(config.MaxDistance - 2, 4)
 	prompt.RequiresLineOfSight = false
 	prompt.KeyboardKeyCode = Enum.KeyCode.E
+	prompt.Style = Enum.ProximityPromptStyle.Custom -- desenhado pelo PromptController
 	prompt.Parent = instance
 
 	-- placa com o progresso em cima do alvo (no mundo, não é interface nova)
