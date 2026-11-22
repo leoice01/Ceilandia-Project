@@ -31,6 +31,7 @@ return {
 		VehicleTheft = { Points = 20, Cooldown = 30, MaxPoints = nil, Label = "Roubo de veículo", Alert = true },
 		WoundPolice = { Points = 25, Cooldown = 15, MaxPoints = nil, Label = "Policial ferido", Alert = true },
 		StoreRobbery = { Points = 30, Cooldown = 60, MaxPoints = nil, Label = "Roubo a estabelecimento", Alert = true },
+		EvidenceRobbery = { Points = 30, Cooldown = 60, MaxPoints = nil, Label = "Roubo na delegacia (cofre de evidências)", Alert = true },
 		-- graves
 		KillPolice = { Points = 40, Cooldown = 60, MaxPoints = nil, Label = "Policial abatido", Alert = true },
 		JewelryRobbery = { Points = 60, Cooldown = 120, MaxPoints = nil, Label = "Roubo a joalheria", Alert = true },
@@ -83,4 +84,6 @@ return {
 	},
 	AlertPinSeconds = 25, -- quanto tempo o alerta fica no minimapa da polícia
 	TickInterval = 0.25, -- s entre atualizações de perseguição no servidor
+	-- Imprime abertura e mudança de estado das ocorrências no Output (só no Studio)
+	DebugIncidents = true,
 }

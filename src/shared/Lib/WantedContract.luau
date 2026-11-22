@@ -17,7 +17,16 @@
 
 export type Status = "NotWanted" | "Wanted" | "Suspected" | "Pursued" | "Escaping" | "Escaped"
 
-export type AlertKind = "Crime" | "Pursuit" | "ContactLost" | "Escaped" | "Cleared"
+-- Sync = ocorrência que já estava aberta, mandada a quem acabou de entrar na Polícia
+export type AlertKind = "Crime" | "Pursuit" | "ContactLost" | "Escaped" | "Cleared" | "Sync"
+
+-- Ocorrência ligada ao alerta. state: "Reported" | "Active" | "Pursuit" | "Resolved" | "Escaped"
+export type IncidentInfo = {
+	id: number,
+	state: string,
+	time: number, -- os.time() do crime
+	crime: string,
+}
 
 export type Alert = {
 	kind: AlertKind,
@@ -29,6 +38,7 @@ export type Alert = {
 	radius: number, -- tamanho da área (studs)
 	suspect: string?, -- nome do suspeito quando identificado e o nível permite
 	suspectActive: boolean, -- false = suspeito escapou/saiu
+	incident: IncidentInfo?, -- ocorrência registrada (IncidentService)
 }
 
 local WantedContract = {

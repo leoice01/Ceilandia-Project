@@ -3,7 +3,7 @@
 | Tarefa | Área | Status | Arquivos |
 |---|---|---|---|
 | Escolha de lado: civil neutro, bandido ou polícia | P2 · Servidor | A fazer | |
-| Procurado (estrelas), bounty e algemas | P2 · Servidor | Fazendo (procurado adiantado a pedido do usuário: crimes, estrelas, perseguição, fuga, redução e alertas da polícia testados no Studio com dummy policial; falta bounty pago, algemas, roubos chamarem reportCrime e teste com 2 jogadores) | src/server/Services/WantedService.luau, src/shared/Config/Wanted.luau, src/shared/Lib/WantedContract.luau, src/client/Controllers/PoliceAlertController.luau |
+| Procurado (estrelas), bounty e algemas | P2 · Servidor | Fazendo (procurado, delegacia provisória, equipe Polícia, roubo de teste e ocorrências testados no Studio com 1 jogador; falta bounty pago, algemas e teste com 2 jogadores) | src/server/Services/WantedService.luau, src/shared/Config/Wanted.luau, src/shared/Lib/WantedContract.luau, src/client/Controllers/PoliceAlertController.luau |
 | Lógica dos roubos tier 1 e 2 | P2 · Servidor | A fazer | |
 | Inventário, mochila e peso (servidor) | P2 · Servidor | A fazer | |
 | Mercado negro, receptador e lavagem | P2 · Servidor | A fazer | |

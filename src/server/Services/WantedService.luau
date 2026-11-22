@@ -20,6 +20,7 @@ local CombatContract = require(ReplicatedStorage.Shared.Lib.CombatContract)
 local WantedContract = require(ReplicatedStorage.Shared.Lib.WantedContract)
 local WantedConfig = require(ReplicatedStorage.Shared.Config.Wanted)
 local Factions = require(script.Parent.Parent.Combat.Factions)
+local IncidentService = require(script.Parent.IncidentService)
 
 type Status = WantedContract.Status
 type Alert = WantedContract.Alert
@@ -213,18 +214,44 @@ local ALERT_LABEL: { [AlertKind]: string } = {
 	ContactLost = "Contato visual perdido com o suspeito",
 	Escaped = "Suspeito escapou",
 	Cleared = "Ocorrência encerrada",
+	Sync = "",
 }
 
-local function sendAlert(kind: AlertKind, record: Record, position: Vector3?, crimeId: string?)
-	local stars = math.max(starsOf(record), 1)
-	local detail = WantedConfig.AlertDetail[math.min(stars, #WantedConfig.AlertDetail)]
-	local approximate: Vector3? = nil
-	if detail.Location and position then
-		-- centro deslocado dentro do raio: área de busca, não posição exata
-		local angle = rng:NextNumber(0, math.pi * 2)
-		local distance = rng:NextNumber(0, detail.Radius * 0.6)
-		approximate = position + Vector3.new(math.cos(angle) * distance, 0, math.sin(angle) * distance)
+type Detail = { Location: boolean, Radius: number, ShowSuspect: boolean, Priority: string }
+
+local function detailFor(stars: number): Detail
+	local level = math.clamp(stars, 1, #WantedConfig.AlertDetail)
+	return WantedConfig.AlertDetail[level]
+end
+
+-- centro deslocado dentro do raio: área de busca, não posição exata
+local function approximate(position: Vector3?, detail: Detail): Vector3?
+	if not detail.Location or not position then
+		return nil
 	end
+	local angle = rng:NextNumber(0, math.pi * 2)
+	local distance = rng:NextNumber(0, detail.Radius * 0.6)
+	return position + Vector3.new(math.cos(angle) * distance, 0, math.sin(angle) * distance)
+end
+
+local function incidentInfo(incident: IncidentService.Incident?): WantedContract.IncidentInfo?
+	if not incident then
+		return nil
+	end
+	return { id = incident.id, state = incident.state, time = incident.time, crime = incident.crime }
+end
+
+local function firePolice(alert: Alert, except: Player?)
+	for _, player in Players:GetPlayers() do
+		if player ~= except and isPolicePlayer(player) then
+			alertRemote:FireClient(player, alert)
+		end
+	end
+end
+
+local function sendAlert(kind: AlertKind, record: Record, position: Vector3?, crimeId: string?, incident: IncidentService.Incident?)
+	local stars = math.max(starsOf(record), 1)
+	local detail = detailFor(stars)
 	local crime = if crimeId then WantedConfig.Crimes[crimeId] else nil
 	local alert: Alert = {
 		kind = kind,
@@ -232,16 +259,14 @@ local function sendAlert(kind: AlertKind, record: Record, position: Vector3?, cr
 		label = if crime then crime.Label else ALERT_LABEL[kind],
 		stars = stars,
 		priority = detail.Priority,
-		position = approximate,
+		-- crime: o local registrado na ocorrência; perseguição/contato: último local visto
+		position = if kind == "Crime" and incident then incident.approx else approximate(position, detail),
 		radius = detail.Radius,
 		suspect = if detail.ShowSuspect and record.identified then record.player.DisplayName else nil,
 		suspectActive = kind ~= "Escaped" and kind ~= "Cleared",
+		incident = incidentInfo(incident),
 	}
-	for _, player in Players:GetPlayers() do
-		if player ~= record.player and isPolicePlayer(player) then
-			alertRemote:FireClient(player, alert)
-		end
-	end
+	firePolice(alert, record.player)
 end
 
 local function clear(record: Record)
@@ -250,7 +275,8 @@ local function clear(record: Record)
 	records[player] = newRecord(player)
 	publish(records[player])
 	if wasWanted then
-		sendAlert("Cleared", record, nil, nil)
+		local incident = IncidentService.setSuspectState(player, "Resolved")
+		sendAlert("Cleared", record, nil, nil, incident)
 	end
 end
 
@@ -266,7 +292,8 @@ local function startPursuit(record: Record, position: Vector3)
 	record.phase = "Wanted"
 	record.identified = true
 	if was ~= "Pursued" then
-		sendAlert("Pursuit", record, position, nil)
+		local incident = IncidentService.setSuspectState(record.player, "Pursuit", starsOf(record), true)
+		sendAlert("Pursuit", record, position, nil, incident)
 	end
 end
 
@@ -327,7 +354,21 @@ reportCrime = function(player: Player, crimeId: string, position: Vector3, optio
 	end
 
 	if crime.Alert then
-		sendAlert("Crime", record, position, crimeId)
+		-- ocorrência: tipo, suspeito (se identificado), local, hora, gravidade e estado
+		local stars = math.max(starsOf(record), 1)
+		local detail = detailFor(stars)
+		local incident = IncidentService.open({
+			crime = crimeId,
+			label = crime.Label,
+			suspect = player,
+			identified = record.identified,
+			position = position,
+			approx = approximate(position, detail),
+			radius = detail.Radius,
+			threat = stars,
+			priority = detail.Priority,
+		})
+		sendAlert("Crime", record, position, crimeId, incident)
 	end
 	if witnessed then
 		startPursuit(record, position)
@@ -379,7 +420,8 @@ local function step(record: Record, dt: number, now: number)
 	else
 		if record.status == "Pursued" then
 			record.phase = "Escaping"
-			sendAlert("ContactLost", record, record.searchCenter, nil)
+			local incident = IncidentService.setSuspectState(player, "Active")
+			sendAlert("ContactLost", record, record.searchCenter, nil, incident)
 		end
 		if record.phase ~= "Escaped" then
 			-- fuga só anda sem polícia por perto; dentro da área de busca anda mais devagar
@@ -395,7 +437,8 @@ local function step(record: Record, dt: number, now: number)
 				record.lastDecayAt = now
 				record.identified = false
 				record.searchCenter = nil
-				sendAlert("Escaped", record, nil, nil)
+				local incident = IncidentService.setSuspectState(player, "Escaped")
+				sendAlert("Escaped", record, nil, nil, incident)
 			end
 		end
 		record.status = if near and record.phase ~= "Escaped" then "Suspected" else record.phase
@@ -443,6 +486,26 @@ end
 function WantedService.getStatus(player: Player): Status
 	local record = records[player]
 	return if record and record.points > 0 then record.status else "NotWanted"
+end
+
+-- Manda as ocorrências abertas para um policial (entrou agora na Polícia)
+function WantedService.syncPolice(player: Player)
+	for _, incident in IncidentService.openIncidents() do
+		local detail = detailFor(incident.threat)
+		local alert: Alert = {
+			kind = "Sync",
+			crime = incident.crime,
+			label = incident.label,
+			stars = incident.threat,
+			priority = incident.priority,
+			position = incident.approx,
+			radius = incident.radius,
+			suspect = if detail.ShowSuspect and incident.identified then incident.suspect.DisplayName else nil,
+			suspectActive = true,
+			incident = incidentInfo(incident),
+		}
+		alertRemote:FireClient(player, alert)
+	end
 end
 
 -- Preso ou morto: zera
@@ -518,6 +581,10 @@ function WantedService:Start()
 			if not isRobber(player) then
 				WantedService.clear(player)
 			end
+			-- policial novo recebe as ocorrências que já estão abertas
+			if isPolicePlayer(player) then
+				WantedService.syncPolice(player)
+			end
 		end)
 	end
 	for _, player in Players:GetPlayers() do
@@ -525,6 +592,11 @@ function WantedService:Start()
 	end
 	Players.PlayerAdded:Connect(onPlayer)
 	Players.PlayerRemoving:Connect(function(player: Player)
+		local record = records[player]
+		if record and record.points > 0 then
+			local incident = IncidentService.setSuspectState(player, "Resolved")
+			sendAlert("Cleared", record, nil, nil, incident)
+		end
 		records[player] = nil
 		cooldowns[player] = nil
 	end)

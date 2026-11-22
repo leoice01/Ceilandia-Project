@@ -35,12 +35,12 @@ local function notify(title: string, text: string)
 	end)
 end
 
-local function addPin(alert: WantedContract.Alert)
-	local position = alert.position
-	local icon = PIN_ICON[alert.kind]
-	if not position or not icon then
-		return
-	end
+-- ocorrências conhecidas por este policial (id -> último estado) e seus pinos
+local incidents: { [number]: WantedContract.IncidentInfo } = {}
+local incidentPins: { [number]: Part } = {}
+local CLOSED: { [string]: boolean } = { Resolved = true, Escaped = true }
+
+local function makePin(position: Vector3, icon: string, stars: number, radius: number): Part
 	local pin = Instance.new("Part")
 	pin.Name = "PoliceAlert"
 	pin.Anchored = true
@@ -51,11 +51,43 @@ local function addPin(alert: WantedContract.Alert)
 	pin.Size = Vector3.one
 	pin.Position = position
 	pin:SetAttribute("Icon", icon)
-	pin:SetAttribute("Color", SEVERITY_COLOR[math.clamp(alert.stars, 1, #SEVERITY_COLOR)])
-	pin:SetAttribute("Radius", alert.radius)
+	pin:SetAttribute("Color", SEVERITY_COLOR[math.clamp(stars, 1, #SEVERITY_COLOR)])
+	pin:SetAttribute("Radius", radius)
 	pin.Parent = folder
 	CollectionService:AddTag(pin, PIN_TAG)
 	Debris:AddItem(pin, WantedConfig.AlertPinSeconds)
+	return pin
+end
+
+-- Pino no minimapa. Com ocorrência: um pino por ocorrência (atualiza no lugar);
+-- ocorrência fechada (escapou/resolvida) tira o pino.
+local function updatePin(alert: WantedContract.Alert)
+	local incident = alert.incident
+	local id = if incident and typeof(incident.id) == "number" then incident.id else nil
+	if id and incident then
+		incidents[id] = incident
+		if CLOSED[incident.state] then
+			local old = incidentPins[id]
+			if old then
+				old:Destroy()
+			end
+			incidentPins[id] = nil
+			return
+		end
+	end
+	local position = alert.position
+	local icon = PIN_ICON[if alert.kind == "Sync" then "Crime" else alert.kind]
+	if typeof(position) ~= "Vector3" or not icon then
+		return
+	end
+	local pin = makePin(position, icon, alert.stars, alert.radius)
+	if id then
+		local old = incidentPins[id]
+		if old then
+			old:Destroy()
+		end
+		incidentPins[id] = pin
+	end
 end
 
 local function onAlert(raw: unknown)
@@ -66,11 +98,19 @@ local function onAlert(raw: unknown)
 	if typeof(alert.label) ~= "string" or typeof(alert.stars) ~= "number" then
 		return
 	end
+	updatePin(alert)
+	if alert.kind == "Sync" then
+		return -- ocorrência antiga: só o pino, sem notificação
+	end
 	local stars = string.rep("★", math.clamp(math.floor(alert.stars), 1, 5))
 	local who = if typeof(alert.suspect) == "string" then "Suspeito: " .. alert.suspect else "Suspeito não identificado"
 	local where = if typeof(alert.position) == "Vector3" then "área marcada no mapa" else "local desconhecido"
 	notify(("%s  %s"):format(stars, alert.label), ("%s · %s · prioridade %s"):format(who, where, tostring(alert.priority)))
-	addPin(alert)
+end
+
+-- Ocorrências que este policial conhece (para uma futura tela da central)
+function PoliceAlertController.incidents(): { [number]: WantedContract.IncidentInfo }
+	return incidents
 end
 
 function PoliceAlertController:Init()

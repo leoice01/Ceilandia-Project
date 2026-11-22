@@ -1,5 +1,5 @@
 --!strict
--- Dá as armas de cada jogador ao nascer: principal e secundária (Shared/Config/Loadout),
+-- Dá as armas de cada jogador ao nascer: principal e secundária da facção (Shared/Config/Loadout),
 -- com pente cheio e munição reserva. Quem controla munição e recarga é o CombatService;
 -- equipar/guardar é a Tool do Roblox (o cliente equipa e o servidor vê pela Tool no personagem).
 
@@ -11,6 +11,7 @@ local CombatContract = require(ReplicatedStorage.Shared.Lib.CombatContract)
 local Weapons = require(ReplicatedStorage.Shared.Config.Weapons)
 local LoadoutConfig = require(ReplicatedStorage.Shared.Config.Loadout)
 local WeaponModels = require(script.Parent.Parent.Combat.WeaponModels)
+local Factions = require(script.Parent.Parent.Combat.Factions)
 
 local ATTR = CombatContract.Attributes
 
@@ -32,11 +33,19 @@ local function makeWeapon(weaponId: string): Tool?
 	return tool
 end
 
-local function loadoutIds(): { string }
-	local ids = { LoadoutConfig.Primary, LoadoutConfig.Secondary }
+-- Kit da facção atual (policial e ladrão têm armas diferentes; civil não tem)
+local function loadoutIds(player: Player): { string }
+	local kit = LoadoutConfig.ByFaction[Factions.of(player)]
+	if not kit then
+		return {}
+	end
+	local ids = { kit.Primary, kit.Secondary }
 	if RunService:IsStudio() then
 		for _, id in LoadoutConfig.StudioExtras do
-			table.insert(ids, id)
+			-- arma extra que já está no kit não entra de novo
+			if not table.find(ids, id) then
+				table.insert(ids, id)
+			end
 		end
 	end
 	return ids
@@ -49,13 +58,18 @@ local function giveLoadout(player: Player)
 	if not backpack then
 		return
 	end
-	-- arma que não veio daqui (StarterPack antigo) sai, para não ter duas
-	for _, child in backpack:GetChildren() do
-		if child:IsA("Tool") and child:GetAttribute(ATTR.Weapon) ~= nil and child:GetAttribute(ATTR.Slot) == nil then
-			child:Destroy()
+	-- nunca duas cópias: qualquer arma que já esteja na mochila ou na mão sai antes
+	-- (StarterPack antigo, chamada repetida, kit da equipe anterior)
+	for _, holder in { backpack, player.Character } do
+		if holder then
+			for _, child in holder:GetChildren() do
+				if child:IsA("Tool") and child:GetAttribute(ATTR.Weapon) ~= nil then
+					child:Destroy()
+				end
+			end
 		end
 	end
-	for _, weaponId in loadoutIds() do
+	for _, weaponId in loadoutIds(player) do
 		local tool = makeWeapon(weaponId)
 		if tool then
 			tool.Parent = backpack

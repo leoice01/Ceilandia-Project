@@ -51,6 +51,7 @@ local hitRemote: RemoteEvent
 local fxRemote: RemoteEvent
 local damagedRemote: RemoteEvent
 local fireBudget: { [Player]: { tokens: number, last: number } } = {}
+local lastCombat: { [Player]: number } = {} -- último tiro dado, dano dado ou dano levado
 local lastSeq: { [Player]: number } = {}
 -- chave fraca: a Tool destruída (respawn) sai sozinha da tabela
 local equippedAt: { [Tool]: number } = setmetatable({}, { __mode = "k" }) :: any
@@ -124,6 +125,13 @@ local function applyDamage(
 	region: Damage.Region,
 	rawDamage: number
 ): (HitResult, ArmorHit, number, number)
+	-- em combate: quem atacou e quem foi atacado (trava a troca de equipe)
+	local now = os.clock()
+	lastCombat[attacker] = now
+	local victimPlayer = Players:GetPlayerFromCharacter(model)
+	if victimPlayer then
+		lastCombat[victimPlayer] = now
+	end
 	-- Proteção de spawn: ForceField bloqueia o dano todo
 	if model:FindFirstChildOfClass("ForceField") then
 		return "Hit", "None", 0, 0
@@ -323,6 +331,12 @@ local function processShot(player: Player, payload: FirePayload): ShotReport?
 	end
 
 	tool:SetAttribute(ATTR.Ammo, ammo - 1)
+	-- atirar acaba com a proteção de spawn (ela não serve para atacar)
+	local shield = character:FindFirstChildOfClass("ForceField")
+	if shield then
+		shield:Destroy()
+	end
+	lastCombat[player] = now
 	-- disparo em via pública (o WantedService decide se conta)
 	WantedService.onShotFired(player, origin)
 
@@ -441,6 +455,12 @@ local function onReload(player: Player)
 	end)
 end
 
+-- Segundos desde o último tiro dado ou dano dado/levado (math.huge = nunca)
+function CombatService.secondsSinceCombat(player: Player): number
+	local last = lastCombat[player]
+	return if last then os.clock() - last else math.huge
+end
+
 -- Recarga vinda de outra entrada do servidor (ponte da arma legada)
 function CombatService.reload(player: Player)
 	onReload(player)
@@ -507,6 +527,7 @@ function CombatService:Start()
 	Players.PlayerAdded:Connect(onPlayer)
 	Players.PlayerRemoving:Connect(function(player: Player)
 		fireBudget[player] = nil
+		lastCombat[player] = nil
 		lastSeq[player] = nil
 	end)
 end
