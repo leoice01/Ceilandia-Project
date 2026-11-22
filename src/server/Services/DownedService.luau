@@ -12,6 +12,7 @@ local CombatContract = require(ReplicatedStorage.Shared.Lib.CombatContract)
 local DownedConfig = require(ReplicatedStorage.Shared.Config.Downed)
 local Factions = require(script.Parent.Parent.Combat.Factions)
 local ArmorService = require(script.Parent.ArmorService)
+local WantedService = require(script.Parent.WantedService)
 
 type FeedKind = CombatContract.FeedKind
 
@@ -22,6 +23,7 @@ type DownedState = {
 	walkSpeed: number,
 	jumpPower: number,
 	jumpHeight: number,
+	maxHealth: number,
 	regenScript: Script?,
 	prompts: { ProximityPrompt },
 	holds: { [ProximityPrompt]: { [Player]: number } },
@@ -63,6 +65,7 @@ local function clear(state: DownedState, restore: boolean)
 		state.model:SetAttribute(ATTR.Downed, nil)
 	end
 	if restore then
+		state.humanoid.MaxHealth = state.maxHealth
 		state.humanoid.WalkSpeed = state.walkSpeed
 		state.humanoid.JumpPower = state.jumpPower
 		state.humanoid.JumpHeight = state.jumpHeight
@@ -187,6 +190,7 @@ function DownedService.down(model: Model, humanoid: Humanoid, attacker: Player?)
 		humanoid = humanoid,
 		player = Players:GetPlayerFromCharacter(model),
 		walkSpeed = humanoid.WalkSpeed,
+		maxHealth = humanoid.MaxHealth,
 		jumpPower = humanoid.JumpPower,
 		jumpHeight = humanoid.JumpHeight,
 		regenScript = if regen and regen:IsA("Script") then regen else nil,
@@ -204,7 +208,10 @@ function DownedService.down(model: Model, humanoid: Humanoid, attacker: Player?)
 	if state.regenScript then
 		state.regenScript.Enabled = false
 	end
-	humanoid.Health = math.min(DownedConfig.DownedHealth, humanoid.MaxHealth)
+	-- o sangue do derrubado pode passar da vida normal (Rob Run: 150), então a vida
+	-- máxima sobe enquanto está no chão e volta ao levantar
+	humanoid.MaxHealth = DownedConfig.DownedHealth
+	humanoid.Health = DownedConfig.DownedHealth
 	-- Caiu = placas quebradas; tiros no chão vão direto no sangue
 	ArmorService.strip(model)
 	model:SetAttribute(ATTR.Downed, true)
@@ -224,6 +231,7 @@ function DownedService.down(model: Model, humanoid: Humanoid, attacker: Player?)
 			return Factions.canDamage(player, victim)
 		end, function(player: Player)
 			kill(state, "Finished", player)
+			WantedService.onFinished(player, state.model, state.player)
 		end)
 	end
 

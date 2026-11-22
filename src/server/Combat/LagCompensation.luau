@@ -28,10 +28,14 @@ local EPSILON = 1e-9
 
 -- Pose do corpo que o PoseAnimator (cliente) desenha agachado e no slide. O servidor não
 -- vê essas poses (são só C0 nos clientes), então aplica a mesma transformação na hitbox.
--- Mesmos valores do PoseAnimator legado: se mudar lá, mude aqui.
+-- Agachado: mesmos valores de Shared/Config/AnimationClips. Slide e derrubado: mesmos
+-- valores do PoseAnimator legado. Se mudar lá, mude aqui.
 type BodyPose = { drop: number, lean: number, rightLeg: number, leftLeg: number }
-local CROUCH_POSE: BodyPose = { drop = 1.0, lean = math.rad(-12), rightLeg = math.rad(70), leftLeg = math.rad(-60) }
+-- agachado = ajoelhado sobre as pernas; mesmos valores de Shared/Config/AnimationClips
+local CROUCH_POSE: BodyPose = { drop = 1.5, lean = math.rad(-5), rightLeg = math.rad(-88), leftLeg = math.rad(-92) }
 local SLIDE_POSE: BodyPose = { drop = 1.3, lean = math.rad(40), rightLeg = math.rad(45), leftLeg = math.rad(-15) }
+-- derrubado: deitado de bruços (os braços esticados à frente não entram na hitbox)
+local DOWNED_POSE: BodyPose = { drop = 2.5, lean = math.rad(-90), rightLeg = 0, leftLeg = 0 }
 local RIGHT_HIP = CFrame.new(0.5, -1, 0) -- quadril no espaço do Torso (R6)
 local LEFT_HIP = CFrame.new(-0.5, -1, 0)
 
@@ -43,6 +47,9 @@ local histories: { [Model]: History } = {}
 local started = false
 
 local function bodyPoseOf(character: Model): BodyPose?
+	if character:GetAttribute("Downed") == true then
+		return DOWNED_POSE
+	end
 	if character:GetAttribute("Pose") == "Slide" then
 		return SLIDE_POSE
 	end
@@ -237,6 +244,13 @@ function LagCompensation.raycastCharacter(character: Model, t: number, origin: V
 		return bestPart, bestFraction * length
 	end
 	return nil, nil
+end
+
+-- CFrame atual de uma parte com a pose do corpo que o cliente desenha (agachado, slide,
+-- derrubado). Usado para conferir a origem do tiro contra a cabeça "de verdade".
+function LagCompensation.posedCFrame(character: Model, part: BasePart): CFrame
+	local poser = poserFor(character)
+	return if poser then poser(part) else part.CFrame
 end
 
 -- Tempo no servidor para reconstruir os alvos, a partir do timestamp do cliente

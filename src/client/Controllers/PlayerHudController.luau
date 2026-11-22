@@ -6,6 +6,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local StarterGui = game:GetService("StarterGui")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local CombatContract = require(Shared:WaitForChild("Lib"):WaitForChild("CombatContract"))
@@ -15,7 +16,7 @@ local ATTR = CombatContract.Attributes
 
 -- Aparência (UX do cliente, não é balanceamento)
 local WIDTH = 300 -- px
-local HOTBAR_CLEARANCE = 80 -- px acima da borda de baixo, para ficar em cima da barra de itens
+local HOTBAR_CLEARANCE = 96 -- px acima da borda de baixo, para ficar em cima da barra de atalhos (HotbarController)
 local PLATE_HEIGHT = 10
 local HEALTH_HEIGHT = 12
 local GAP = 4
@@ -62,6 +63,11 @@ local function bar(parent: Instance, position: UDim2, size: UDim2): (Frame, Fram
 end
 
 function PlayerHudController:Start()
+	-- a barra de vida padrão do Roblox some: este HUD já mostra a vida
+	pcall(function()
+		StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Health, false)
+	end)
+
 	local gui = Instance.new("ScreenGui")
 	gui.Name = "PlayerHud"
 	gui.ResetOnSpawn = false

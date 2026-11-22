@@ -17,7 +17,8 @@ local IS_SERVER = RunService:IsServer()
 
 local Net = {}
 
-local lastCall: { [string]: { [Player]: number } } = {}
+type Bucket = { tokens: number, last: number }
+local lastCall: { [string]: { [Player]: Bucket } } = {}
 local lastAbuseLog: { [Player]: { [string]: number } } = {}
 local abuseCount: { [Player]: number } = {}
 
@@ -103,17 +104,26 @@ end
 function Net.listen(name: string, validator: Validator, handler: Handler, minInterval: number?): RemoteEvent
 	local remote = Net.serverEvent(name)
 	local interval = minInterval or NetConfig.DefaultMinInterval
-	local calls: { [Player]: number } = {}
+	local burst = NetConfig.BurstCapacity
+	local calls: { [Player]: Bucket } = {}
 	lastCall[name] = calls
 
+	-- Balde de fichas: na média no máximo 1 chamada por intervalo, mas aceita alguns
+	-- pacotes chegando juntos (a rede agrupa pacotes que saíram espaçados do cliente)
 	remote.OnServerEvent:Connect(function(player: Player, ...: any)
 		local now = os.clock()
-		local prev = calls[player]
-		if prev and now - prev < interval then
+		local bucket = calls[player]
+		if not bucket then
+			bucket = { tokens = burst, last = now }
+			calls[player] = bucket
+		end
+		bucket.tokens = math.min(burst, bucket.tokens + (now - bucket.last) / interval)
+		bucket.last = now
+		if bucket.tokens < 1 then
 			Net.reportAbuse(player, name, "rate_limit")
 			return
 		end
-		calls[player] = now
+		bucket.tokens -= 1
 
 		local ok, reason = validator(...)
 		if not ok then

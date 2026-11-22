@@ -90,6 +90,7 @@ function LegacyGunBridge:Start()
 			direction = offset.Unit,
 			timestamp = workspace:GetServerTimeNow(),
 			weaponId = weaponId,
+			seq = CombatService.nextSeq(player),
 		})
 		if not report then
 			return

@@ -7,16 +7,19 @@
 --   CombatReload()                    pedido de recarga
 --   ArmorInsertPlate()                pedido de colocar UMA placa no colete; para encher
 --                                     o colete, o cliente manda de novo quando Plating sumir
+--   GrenadeThrow(direction: Vector3)  lançar a granada equipada na direção (vetor unitário)
 -- Servidor -> cliente
 --   CombatHit(region: HitRegion, result: HitResult, armor: ArmorHit,
 --             armorDamage: number, healthDamage: number, hitPos: Vector3)
 --       só para quem atirou: confirma o acerto (hitmarker real). armor diz se bateu
 --       na armadura e se quebrou uma placa; armorDamage/healthDamage = quanto foi para
 --       a armadura e para a vida (números de dano); hitPos = onde o tiro bateu
---   CombatFX(shooter: Player, weaponId: string, origin: Vector3, hitPos: Vector3)
---       para os outros jogadores por perto: desenhar rastro e impacto
+--   CombatFX(shooter: Player, weaponId: string, origin: Vector3, hitPositions: { Vector3 })
+--       para os outros jogadores por perto: desenhar rastro e impacto (um por chumbo)
 --   CombatFeed(kind: FeedKind, actor: Player?, victimName: string)
 --       para todos: kill feed (actor = quem derrubou/finalizou/reviveu; nil = sangrou)
+--   CombatDamaged(sourcePos: Vector3, amount: number)
+--       só para quem levou dano: de onde veio (indicador de direção do dano)
 --
 -- Atributos que só o servidor escreve:
 --   Player.Faction (string)        "Civil" | "Policia" | "Bandido"; sem atributo = DefaultFaction
@@ -28,7 +31,11 @@
 --   Character.ArmorHelmet (number) capacete: absorve dano na cabeça, antes do colete
 --   Character.Downed (boolean)     derrubado: rasteja, não atira; Humanoid.Health = sangue que resta
 --   Model.Downable (boolean)       NPC/dummy que cai derrubado em vez de morrer (jogadores sempre caem)
---   Tool.Weapon (string), Tool.Ammo (number), Tool.Reloading (boolean)
+--   Tool.Weapon (string), Tool.Ammo (number, no pente), Tool.Reserve (number, fora do pente),
+--   Tool.Reloading (boolean), Tool.Slot (string "Primary" | "Secondary")
+--
+-- Atributos que só o cliente dono escreve (para a pose local; não replicam):
+--   Character.Aiming, Character.Firing, Character.Equipping, Character.RecoilKick
 --
 -- Interação (ProximityPrompt criado pelo servidor na HumanoidRootPart de quem está derrubado):
 --   "Revive" (aliado segura E / ButtonX) e "Finish" (inimigo segura F / ButtonY). O cliente pode esconder o prompt
@@ -43,6 +50,7 @@ export type FirePayload = {
 	direction: Vector3, -- vetor unitário da mira
 	timestamp: number, -- workspace:GetServerTimeNow() no cliente na hora do tiro
 	weaponId: string, -- atributo Weapon da Tool equipada
+	seq: number, -- número do tiro, sempre crescente por jogador (evita contar o mesmo tiro duas vezes)
 }
 
 export type HitRegion = "Head" | "Torso" | "Limb"
@@ -52,7 +60,8 @@ export type FeedKind = "Downed" | "Finished" | "BledOut" | "Revived"
 export type ArmorHit = "None" | "Hit" | "Broken"
 
 local MAX_WEAPON_ID_LENGTH = 32
-local FIRE_PAYLOAD_FIELDS = 4
+local FIRE_PAYLOAD_FIELDS = 5
+local MAX_SEQ = 2 ^ 31
 
 local CombatContract = {
 	Remotes = {
@@ -61,7 +70,9 @@ local CombatContract = {
 		Hit = "CombatHit",
 		FX = "CombatFX",
 		Feed = "CombatFeed",
+		Damaged = "CombatDamaged",
 		InsertPlate = "ArmorInsertPlate",
+		GrenadeThrow = "GrenadeThrow",
 	},
 	Prompts = {
 		Revive = "Revive",
@@ -76,6 +87,13 @@ local CombatContract = {
 	PlateItem = {
 		Name = "Placas",
 		Attribute = "PlateItem",
+	},
+	-- Granada: Tool criada pelo servidor a cada spawn; o nome mostra quantas restam.
+	-- Player.GrenadesCarried (number) = granadas na mochila.
+	GrenadeItem = {
+		Name = "Granada",
+		Attribute = "GrenadeItem",
+		CountAttribute = "GrenadesCarried",
 	},
 	Factions = {
 		Civil = "Civil",
@@ -97,6 +115,8 @@ local CombatContract = {
 		Weapon = "Weapon",
 		Ammo = "Ammo",
 		Reloading = "Reloading",
+		Reserve = "Reserve",
+		Slot = "Slot",
 	},
 }
 
@@ -127,6 +147,10 @@ function CombatContract.validateFire(payload: any): (boolean, string?)
 	end
 	if not Net.isShortString(payload.weaponId, MAX_WEAPON_ID_LENGTH) then
 		return false, "bad_weapon_id"
+	end
+	local seq = payload.seq
+	if not Net.isFiniteNumber(seq) or seq ~= math.floor(seq) or seq < 0 or seq > MAX_SEQ then
+		return false, "bad_seq"
 	end
 	return true, nil
 end

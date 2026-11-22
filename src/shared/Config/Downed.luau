@@ -1,9 +1,13 @@
 --!strict
--- Estado derrubado. PROVISÓRIO: valores iniciais da P2; a P4 ajusta em playtest.
+-- Estado derrubado. PROVISÓRIO: a P4 ajusta em playtest.
+-- Do Rob Run: finalizar um derrubado leva mais 150 de dano, e policial causa só 20%
+-- do dano em bandido derrubado (incentiva prender em vez de matar).
 
 return {
 	-- Vida (sangue) ao cair; tiros continuam tirando dela e zerar = morte
-	DownedHealth = 100,
+	DownedHealth = 150,
+	-- Fração do dano que um policial causa em bandido derrubado
+	PoliceVsDownedRobberMultiplier = 0.2,
 	-- Tempo até sangrar tudo se ninguém reviver nem finalizar (s)
 	BleedOutSeconds = 30,
 	-- Velocidade rastejando (studs/s)

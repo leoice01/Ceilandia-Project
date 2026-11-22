@@ -41,7 +41,7 @@ end
 -- Dano antes da armadura
 function Damage.compute(weapon: Weapons.WeaponConfig, region: Region, distance: number): number
 	local multiplier = if region == "Head"
-		then weapon.HeadMultiplier
+		then weapon.HeadshotMultiplier
 		elseif region == "Torso" then weapon.TorsoMultiplier
 		else weapon.LimbMultiplier
 	local falloff = Damage.falloff(distance, weapon.FalloffStart, weapon.FalloffEnd, weapon.FalloffMinMultiplier)
